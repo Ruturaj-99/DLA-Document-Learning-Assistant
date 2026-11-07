@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Drag-reorderable page preview</title>
+<script src="./sortable.min.js"></script>
+<!--
+  In-house Streamlit custom component (raw postMessage protocol) for the
+  "rearrange pages with the mouse" feature.
+
+  Protocol confirmed against Streamlit 1.66.1's own frontend bundle:
+    child -> parent: streamlit:componentReady  {isStreamlitMessage: true, apiVersion: 1}
+                     streamlit:setComponentValue {isStreamlitMessage: true, value, dataType: "json"}
+                     streamlit:setFrameHeight    {isStreamlitMessage: true, height}
+    parent -> child: streamlit:render {args: {...}, dfs, disabled, theme}
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: visible; }
+  #cards { display: flex; flex-wrap: wrap; gap: 10px; padding: 2px; align-items: flex-start; }
+  .page-card {
+    position: relative;
+    width: var(--card-w, 240px);
+    background: #ffffff;
+    padding: 6px 6px 5px;
+    border: 2px solid #7a7a7a;
+    border-radius: 4px;
+    box-sizing: border-box;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .page-card.selected { border: 4px solid #e61e1e; padding: 4px 4px 3px; }
+  .page-card img {
+    display: block;
+    width: 100%;
+    height: auto;
+    object-fit: contain;
+    pointer-events: none;
+  }
+  .page-card .cap {
+    text-align: center; color: #5a5a5a; font-size: 12px; padding-top: 3px;
+  }
+  .page-actions {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 5px;
+    z-index: 2;
+  }
+  .page-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 5px;
+    background: #e5e7eb;
+    color: #555;
+    font: 19px/1 sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+  .page-action.remove { background: #dc2626; color: #fff; border-color: #b91c1c; }
+  .page-action.remove:hover { background: #b91c1c; }
+  .page-action.rotate:hover { background: #d1d5db; }
+  #cards.is-busy { pointer-events: none; }
+  .page-busy {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.84);
+    color: #222;
+    font: 14px/1.3 sans-serif;
+    cursor: wait;
+  }
+  .page-busy-spinner {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 22px;
+    border: 3px solid #d1d5db;
+    border-top-color: #2563eb;
+    border-radius: 50%;
+    animation: page-spin 0.75s linear infinite;
+  }
+  @keyframes page-spin { to { transform: rotate(360deg); } }
+  .sortable-ghost { opacity: 0.35; }
+  .sortable-chosen { box-shadow: 0 8px 18px rgba(0, 0, 0, 0.30); }
+</style>
+</head>
+<body>
+<div id="cards"></div>
+
+<script>
+  const container = document.getElementById("cards");
+  let sortable = null;
+
+  // Posts the current height so the Streamlit iframe grows/shrinks with us.
+  function frameHeight() {
+    const box = container.getBoundingClientRect();
+    window.parent.postMessage(
+      {
+        isStreamlitMessage: true,
+        type: "streamlit:setFrameHeight",
+        height: Math.ceil(box.height) + 8,
+      },
+      "*"
+    );
+  }
+
+  // Sends one event back to Python: either a click (select) or a new order.
+  function sendJson(value) {
+    window.parent.postMessage(
+      {
+        isStreamlitMessage: true,
+        type: "streamlit:setComponentValue",
+        value: value,
+        dataType: "json",
+      },
+      "*"
+    );
+  }
+
+  // A drag END is followed by a browser click event on the same card;
+  // this flag swallows exactly that one click so dropping never selects.
+  let swallowNextClick = false;
+
+  function buildCards(args) {
+    const items = (args && args.items) || [];
+    const selected = (args && args.selected) || 0;
+    const perRow = Math.max(1, +(args && args.per_row) || 3);
+
+    container.style.setProperty(
+      "--card-w",
+      "calc((100% - " + 10 * (perRow - 1) + "px) / " + perRow + ")"
+    );
+    container.innerHTML = "";
+
+    items.forEach(function (item) {
+      const card = document.createElement("div");
+      card.className = "page-card" + (item.number === selected ? " selected" : "");
+      card.dataset.number = item.number;
+
+      const img = document.createElement("img");
+      img.src = item.image;
+      img.addEventListener("load", function () { frameHeight(); });
+
+      const cap = document.createElement("div");
+      cap.className = "cap";
+      cap.textContent = "Page " + item.number;
+
+      const actions = document.createElement("div");
+      actions.className = "page-actions";
+      [
+        {label: "Remove", action: "remove", glyph: "×"},
+        {label: "Rotate 90° clockwise", action: "rotate", glyph: "↻"}
+      ].forEach(function (spec) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "page-action " + spec.action;
+        button.textContent = spec.glyph;
+        button.title = spec.label;
+        button.setAttribute("aria-label", spec.label + " page " + item.number);
+        button.addEventListener("pointerdown", function (event) {
+          event.stopPropagation();
+        });
+        button.addEventListener("click", function (event) {
+          event.stopPropagation();
+          if (container.classList.contains("is-busy")) { return; }
+          const busy = document.createElement("div");
+          busy.className = "page-busy";
+          busy.setAttribute("role", "status");
+          busy.setAttribute("aria-live", "polite");
+          const spinner = document.createElement("span");
+          spinner.className = "page-busy-spinner";
+          spinner.setAttribute("aria-hidden", "true");
+          const status = document.createElement("span");
+          status.textContent =
+            (spec.action === "remove" ? "Removing" : "Rotating") +
+            " page " + item.number + "...";
+          busy.appendChild(spinner);
+          busy.appendChild(status);
+          card.appendChild(busy);
+          card.setAttribute("aria-busy", "true");
+          container.classList.add("is-busy");
+          if (sortable) { sortable.option("disabled", true); }
+          sendJson({type: spec.action, page: item.number});
+        });
+        actions.appendChild(button);
+      });
+
+      card.appendChild(img);
+      card.appendChild(cap);
+      card.appendChild(actions);
+      container.appendChild(card);
+
+      card.addEventListener("click", function () {
+        if (swallowNextClick) { swallowNextClick = false; return; }
+        sendJson({ type: "select", page: item.number });
+        frameHeight();
+      });
+    });
+  }
+
+  function applySortable() {
+    if (sortable) { sortable.destroy(); }
+    sortable = Sortable.create(container, {
+      animation: 150,
+      ghostClass: "sortable-ghost",
+      chosenClass: "sortable-chosen",
+      filter: ".page-action",
+      preventOnFilter: false,
+      onEnd: function () {
+        // Swallow the click that browsers fire right after a drop.
+        swallowNextClick = true;
+        // Read the DOM order back and report it to Python.
+        const order = Array.from(container.children).map(function (card) {
+          return parseInt(card.dataset.number, 10);
+        });
+        sendJson({ type: "order", order: order });
+        frameHeight();
+      }
+    });
+  }
+
+  window.addEventListener("message", function (event) {
+    const data = event.data;
+    if (data && data.type === "streamlit:render") {
+      buildCards(data.args);
+      applySortable();
+      requestAnimationFrame(frameHeight);
+    }
+  });
+
+  // Tell Streamlit we exist (required - the iframe stays hidden until then),
+  // then wait for the first render message.
+  window.parent.postMessage(
+    {
+      isStreamlitMessage: true,
+      type: "streamlit:componentReady",
+      apiVersion: 1,
+    },
+    "*"
+  );
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(frameHeight).observe(container);
+  }
+</script>
+</body>
+</html>

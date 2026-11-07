@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime data (uploaded docs, vector index, feedback database)
+data/
+
+# OS junk
+Thumbs.db
+.DS_Store

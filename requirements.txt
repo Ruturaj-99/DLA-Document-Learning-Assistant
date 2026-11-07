@@ -1,0 +1,25 @@
+# AI Document Learning Assistant
+# Libraries are added stage by stage as we build.
+streamlit
+
+# Stage 2: PDF text extraction (pure Python, no external PDF engine needed)
+pypdf
+# Supports complete CFF Type1 font encoding extraction in pypdf.
+fonttools
+
+# Stage 5A: OCR for scanned PDFs
+# - pytesseract: Python wrapper for the Tesseract engine (engine installed separately)
+# - pymupdf: renders PDF pages to images + coordinates (also reused later for highlighting)
+pytesseract
+pymupdf
+
+# Stage 4B: bridge to the local Ollama service (one simple HTTP message)
+requests
+
+# Testing: framework for the per-stage test scripts
+pytest
+
+# Stage 3B: local embeddings for semantic search.
+# sentence-transformers pulls in torch + transformers automatically.
+# Model used: all-MiniLM-L6-v2 (~90 MB, downloaded on first run, CPU-friendly)
+sentence-transformers

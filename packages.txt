@@ -1,0 +1,4 @@
+# Tesseract engine for scanned-PDF OCR on the Linux cloud host
+# (Streamlit Community Cloud / Render / Railway install these with apt-get).
+tesseract-ocr
+tesseract-ocr-eng

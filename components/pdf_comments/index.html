@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PDF comment canvas</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+  }
+  body { box-sizing: border-box; }
+  /* NOTE: never add `container-type` to #page. Inline-size containment makes
+     `width: fit-content` resolve against a box with no contents, so #page and
+     the page image inside it collapse to 0px wide and the canvas becomes
+     unclickable. There are no @container queries in this file. */
+  #page {
+    position: relative;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
+    user-select: none;
+  }
+  #page-image {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    /* This component reports its own height via streamlit:setFrameHeight, so
+       `vh` here resolves against that self-reported height and collapses to
+       ~0 on first layout: the image never grows, the iframe stays ~36px tall
+       and nothing on the page can be clicked. Cap it in pixels instead. */
+    max-height: 1100px;
+    margin: 0 auto;
+  }
+  #markers {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  #drop-preview {
+    position: absolute;
+    z-index: 2;
+    display: none;
+    width: max-content;
+    max-width: 42%;
+    padding: 1px 3px;
+    color: #222;
+    font: 11pt/1.25 sans-serif;
+    white-space: pre-wrap;
+    pointer-events: none;
+  }
+  .marker {
+    position: absolute;
+    width: max-content;
+    max-width: 42%;
+    padding: 1px 3px;
+    border: 0;
+    border-radius: 0;
+    color: #202020;
+    font: 11pt/1.25 sans-serif;
+    text-align: left;
+    white-space: pre-wrap;
+    cursor: grab;
+    pointer-events: auto;
+    touch-action: none;
+    box-sizing: border-box;
+  }
+  .marker:active { cursor: grabbing; }
+  /* Small per-comment toolbar pinned to the top-right corner of each placed
+     comment: ✏️ edits its text, 🗑 deletes it. Actions sit above the box so
+     they read even on a highlighted comment. */
+  .marker-actions {
+    position: absolute;
+    top: -9px;
+    right: 1px;
+    display: flex;
+    gap: 2px;
+    z-index: 3;
+  }
+  .marker-actions button {
+    padding: 1px 4px;
+    border: 1px solid rgba(0, 0, 0, 0.25);
+    border-radius: 5px;
+    background: #ffffff;
+    font-size: 10px;
+    line-height: 1.2;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  }
+  .marker-actions button:hover { background: #f2f2f2; }
+  /* Floating pencil button that opens the comment box (click handler in the
+     script below). z-index keeps it above the marker/drop overlays so the
+     tap is never swallowed. */
+  #pencil {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    padding: 5px 8px;
+    border: 1px solid rgba(0, 0, 0, 0.25);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.85);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  #pencil:hover { background: #ffffff; }
+  #hint {
+    margin: 0;
+    padding: 7px 10px;
+    color: #555;
+    background: #f5f5f5;
+    font: 12px/1.5 sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="page">
+  <img id="page-image" alt="Selected PDF page">
+  <button id="pencil" type="button" title="Add a comment" aria-label="Add a comment">✏️</button>
+  <div id="markers"></div>
+  <div id="drop-preview"></div>
+</div>
+<p id="hint"></p>
+<script>
+  const page = document.getElementById("page");
+  const image = document.getElementById("page-image");
+  const markers = document.getElementById("markers");
+  const dropPreview = document.getElementById("drop-preview");
+  const hint = document.getElementById("hint");
+  const pencil = document.getElementById("pencil");
+  let draftText = "";
+  let draftColor = "#D9D9D9";
+  let draftHighlighted = false;
+
+  function sendJson(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+
+  function frameHeight() {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setFrameHeight",
+      height: Math.ceil(document.body.scrollHeight) + 4
+    }, "*");
+  }
+
+  function normalizedPosition(event) {
+    const rect = image.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+    };
+  }
+
+  function insideImage(event) {
+    const rect = image.getBoundingClientRect();
+    return event.clientX >= rect.left && event.clientX <= rect.right &&
+      event.clientY >= rect.top && event.clientY <= rect.bottom;
+  }
+
+  function render(args) {
+    image.src = args.image;
+    draftText = args.draft_text || "";
+    draftColor = args.draft_color || "#D9D9D9";
+    draftHighlighted = Boolean(args.draft_highlighted);
+    image.style.cursor = draftText ? "crosshair" : "default";
+    hint.textContent = draftText
+      ? "Click or drag on the page to place the highlighted text."
+      : "Drag existing highlighted text to move it.";
+    markers.replaceChildren();
+    dropPreview.style.display = "none";
+
+    (args.comments || []).forEach(function (comment, index) {
+      const marker = document.createElement("div");
+      marker.className = "marker" + (comment.highlighted ? " highlighted" : "");
+      marker.setAttribute("role", "button");
+      marker.tabIndex = 0;
+      marker.style.left = (comment.x * 100) + "%";
+      marker.style.top = (comment.y * 100) + "%";
+      marker.style.backgroundColor = comment.highlighted
+        ? comment.color + "B8"
+        : "transparent";
+      marker.title = comment.text;
+      marker.setAttribute("aria-label", "Comment " + (index + 1) + ": " + comment.text);
+      const label = document.createElement("span");
+      label.textContent = comment.text;
+      marker.appendChild(label);
+      // Per-comment toolbar. Interactions on these buttons must not start a
+      // drag of the marker itself, so they stop pointerdown propagation.
+      const actions = document.createElement("span");
+      actions.className = "marker-actions";
+      [
+        {glyph: "✏️", action: "edit", title: "Edit this comment"},
+        {glyph: "🗑️", action: "delete", title: "Delete this comment"}
+      ].forEach(function (spec) {
+        const actionButton = document.createElement("button");
+        actionButton.type = "button";
+        actionButton.textContent = spec.glyph;
+        actionButton.title = spec.title;
+        actionButton.setAttribute("aria-label", spec.title);
+        actionButton.addEventListener("pointerdown", function (event) {
+          event.stopPropagation();
+        });
+        actionButton.addEventListener("click", function (event) {
+          event.stopPropagation();
+          sendJson({type: spec.action, id: comment.id});
+        });
+        actions.appendChild(actionButton);
+      });
+      marker.appendChild(actions);
+      marker.addEventListener("pointerdown", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        let moved = false;
+        const startX = event.clientX;
+        const startY = event.clientY;
+
+        function onMove(moveEvent) {
+          if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) {
+            moved = true;
+          }
+          if (!moved) return;
+          const position = normalizedPosition(moveEvent);
+          marker.style.left = (position.x * 100) + "%";
+          marker.style.top = (position.y * 100) + "%";
+        }
+
+        function onUp(upEvent) {
+          document.removeEventListener("pointermove", onMove);
+          document.removeEventListener("pointerup", onUp);
+          document.removeEventListener("pointercancel", onUp);
+          if (moved) {
+            const position = normalizedPosition(upEvent);
+            sendJson({type: "move", id: comment.id, x: position.x, y: position.y});
+          }
+        }
+
+        document.addEventListener("pointermove", onMove);
+        document.addEventListener("pointerup", onUp);
+        document.addEventListener("pointercancel", onUp);
+      });
+      markers.appendChild(marker);
+    });
+    requestAnimationFrame(frameHeight);
+  }
+
+  image.addEventListener("pointerdown", function (event) {
+    if (!draftText) return;
+    event.preventDefault();
+    dropPreview.textContent = draftText;
+    dropPreview.style.backgroundColor = draftHighlighted
+      ? draftColor + "B8"
+      : "transparent";
+    dropPreview.style.display = "block";
+    hint.textContent = "Release to place the highlighted text.";
+    const start = normalizedPosition(event);
+    dropPreview.style.left = (start.x * image.clientWidth) + "px";
+    dropPreview.style.top = (start.y * image.clientHeight) + "px";
+
+    function onMove(moveEvent) {
+      const rect = image.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, moveEvent.clientX - rect.left));
+      const y = Math.max(0, Math.min(rect.height, moveEvent.clientY - rect.top));
+      dropPreview.style.left = x + "px";
+      dropPreview.style.top = y + "px";
+      dropPreview.style.display = insideImage(moveEvent) ? "block" : "none";
+    }
+
+    function onUp(upEvent) {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+      dropPreview.style.display = "none";
+      // One-shot placement: the draft is consumed as soon as it is sent, so a
+      // stray second pointerup can never embed the same comment twice. The
+      // next render() call re-arms from fresh args.
+      draftText = "";
+      image.style.cursor = "default";
+      hint.textContent = "Drag existing highlighted text to move it.";
+      if (insideImage(upEvent)) {
+        sendJson(Object.assign({type: "place"}, normalizedPosition(upEvent)));
+      } else {
+        hint.textContent = "Release on the page to place the highlighted text.";
+      }
+    }
+
+    function onCancel() {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+      dropPreview.style.display = "none";
+    }
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onCancel);
+  });
+  // Pencil tap: ask Python to open/close the comment box. The draft drag
+  // handlers on the image are untouched, so adding stays drag-driven.
+  pencil.addEventListener("click", function (event) {
+    event.stopPropagation();
+    sendJson({type: "pencil"});
+  });
+  image.addEventListener("load", frameHeight);
+  window.addEventListener("message", function (event) {
+    if (event.data && event.data.type === "streamlit:render") render(event.data.args);
+  });
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:componentReady",
+    apiVersion: 1
+  }, "*");
+  if (window.ResizeObserver) new ResizeObserver(frameHeight).observe(page);
+</script>
+</body>
+</html>
