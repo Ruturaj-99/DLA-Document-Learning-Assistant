@@ -1,15 +1,36 @@
 # Secrets
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
 
 # Runtime data (uploaded docs, vector index, feedback database)
 data/
+*.pdf
+
+# Temporary files and logs
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.log
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
 
 # OS junk
 Thumbs.db
 .DS_Store
+Desktop.ini
