@@ -1,8 +1,10 @@
 # AI Document Learning Assistant
 
-A private-by-design PDF workspace: upload a document, refine its pages, add
-comments, replace text, run OCR, and ask questions answered from the document's
-own contents. Processing stays on your computer.
+A PDF workspace: upload a document, refine its pages, add comments, replace
+text, run OCR, and ask questions answered from the document's own contents.
+Local development processes documents on your computer. When deployed to
+Streamlit Community Cloud, uploaded documents are processed on its hosted
+server.
 
 Built with **Streamlit** + **pypdf / PyMuPDF / Tesseract OCR / sentence-transformers**,
 with local AI answering via **Ollama** (`llama3.2:3b`).
@@ -39,6 +41,7 @@ it cannot reach Ollama, and every other feature works.
 
 ## Docs / guides / OCR notes
 
-Tip: uploaded documents are kept in memory and (for example the working copy
-and its comments) in the browser session only - the repository contains no
-user data (`data/` is git-ignored on purpose).
+Tip: uploaded documents are kept in memory during the Streamlit session. On
+Streamlit Community Cloud, processing and session data are on the hosted
+server. The repository contains no user data (`data/` is git-ignored on
+purpose).
