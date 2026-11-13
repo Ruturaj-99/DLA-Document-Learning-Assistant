@@ -112,6 +112,31 @@ tab_upload, tab_edit, tab_ask = st.tabs(
     ["1️⃣ Upload", "2️⃣ Edit PDF", "3️⃣ Ask"]
 )
 
+
+def _materialize_pending_page_order() -> None:
+    """Fold a pending drag-grid page order into the working-copy bytes.
+
+    While the user drags pages in the preview grid, a drop ONLY stores a
+    `page_order` mapping in session state - the working-copy bytes stay
+    untouched, so text extraction, embeddings and every page-thumbnail cache
+    stay hot and the rearrange feels instant. The order is folded into the
+    real bytes on the next FULL app rerun (any tool click, download, tab
+    switch...). Grid-only fragment reruns never reach this, which is exactly
+    what makes rearranging fast.
+    """
+    pending = st.session_state.get("page_order")
+    if not pending:
+        return
+    try:
+        result = apply_page_order(st.session_state.working_pdf, pending)
+    except ValueError:
+        # The page count changed (e.g. a page was removed) while an order was
+        # still pending - drop the stale mapping instead of failing the run.
+        st.session_state.pop("page_order", None)
+        return
+    st.session_state.working_pdf = result.pdf_bytes
+    st.session_state.pop("page_order", None)
+
 # --- Tab 1: Upload + preparation ----------------------------------------------
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -143,6 +168,11 @@ if uploaded_file is not None:
     if st.session_state.get("original_bytes") != pdf_bytes:
         st.session_state.original_bytes = pdf_bytes
         st.session_state.working_pdf = pdf_bytes
+        # A different document invalidates any pending drag-grid order.
+        st.session_state.pop("page_order", None)
+    # Fold a pending drag-grid reorder into the real working copy ONCE, on the
+    # first full rerun after the rearrange (grid-only reruns skip this).
+    _materialize_pending_page_order()
     working_pdf = st.session_state.working_pdf
     is_edited = working_pdf != pdf_bytes
 
@@ -190,6 +220,7 @@ with tab_edit:
         st.info("Upload a PDF in the Upload tab first.")
     else:
         page_count_total = max(len(pages), 1)
+        st.session_state["page_count_total"] = page_count_total
 
         # --- Preview grid: the whole tab = preview cards + tools ---------------
         tool_page = st.session_state.get("tool_page", 1)
@@ -780,111 +811,139 @@ with tab_edit:
         # Natural page scroll (no inner box): the cards take over the page,
         # with the user-chosen number of cards per row. Fewer cards per row
         # = bigger display = higher render DPI, so nothing looks compressed.
-        st.subheader("Pages")
-        per_row = max(1, int(st.session_state.get("per_row", 3)))
-        DPI_PER_ROW = {1: 200, 2: 150, 3: 120}
-        card_dpi = DPI_PER_ROW.get(per_row, 120)
+        # NOTE: the grid runs inside a @st.fragment so grid events (select /
+        # drag reorder) rerun ONLY this block instead of the whole app. That
+        # keeps the heavy pipeline (text extraction, embeddings, tool panel)
+        # completely out of every grid interaction.
+        @st.fragment
+        def pages_grid():
+            st.subheader("Pages")
+            working_pdf_grid = st.session_state.working_pdf
+            page_count = int(st.session_state.get("page_count_total", 1))
+            tool_page = st.session_state.get("tool_page", 1)
+            per_row = max(1, int(st.session_state.get("per_row", 3)))
+            DPI_PER_ROW = {1: 200, 2: 150, 3: 120}
+            card_dpi = DPI_PER_ROW.get(per_row, 120)
 
-        @st.cache_data
-        def cached_page_preview(pdf_bytes: bytes, page_number: int, card_dpi: int):
-            """One plain page render: input to the drag grid."""
-            return render_page_with_boxes(pdf_bytes, page_number, dpi=card_dpi)
+            @st.cache_data
+            def cached_page_preview(pdf_bytes: bytes, page_number: int, card_dpi: int):
+                """One plain page render: input to the drag grid."""
+                return render_page_with_boxes(pdf_bytes, page_number, dpi=card_dpi)
 
-        preview_numbers = list(range(1, visible_count + 1))
+            preview_limit = st.session_state.get("preview_limit", 24)
+            visible_count = min(page_count, preview_limit)
+            preview_numbers = list(range(1, visible_count + 1))
 
-        # Component key version: every consumed event bumps this counter, so
-        # the component gets a fresh state and events never replay forever.
-        grid_key = f"drag_grid_{st.session_state.get('grid_clock', 0)}"
-        drag_event = drag_grid(
-            page_thumbnails=[
-                cached_page_preview(working_pdf, number, card_dpi)
-                for number in preview_numbers
-            ],
-            page_numbers=preview_numbers,
-            selected=tool_page,
-            per_row=per_row,
-            key=grid_key,
-        )
-
-        if isinstance(drag_event, dict):
-            st.session_state["grid_clock"] = (
-                st.session_state.get("grid_clock", 0) + 1
+            # What the grid currently displays: the physical page number shown
+            # at each displayed position. `page_order` holds this mapping while
+            # a drag rearrange has not yet been folded into the working copy,
+            # so the thumbnails below stay cache HITS (working copy bytes did
+            # not change) and the drop is instant.
+            order_map = st.session_state.get("page_order") or list(
+                range(1, page_count + 1)
             )
-            if drag_event.get("type") == "select":
-                selected_page = int(drag_event["page"])
-                st.session_state.tool_page = selected_page
-                st.session_state.preview_page = selected_page
-                st.rerun()
-            elif drag_event.get("type") == "remove":
-                removed_page = int(drag_event.get("page", 0))
-                try:
-                    with st.spinner(f"Removing page {removed_page}..."):
-                        result = delete_pages(working_pdf, [removed_page])
-                except ValueError as page_error:
-                    st.error(f"Error removing page : {page_error}")
-                else:
-                    selected_page = int(st.session_state.get("tool_page", 1))
-                    if removed_page < selected_page:
-                        selected_page -= 1
-                    elif removed_page == selected_page:
-                        selected_page = min(removed_page, page_count_total - 1)
-                    st.session_state.tool_page = max(1, selected_page)
-                    st.session_state.working_pdf = result.pdf_bytes
-                    st.session_state.pop("preview_page", None)
-                    st.session_state.pop("preview_original_pdf", None)
-                    st.session_state.edit_note = (
-                        f"Page {removed_page} removed successfully."
+
+            # Component key version: every consumed event bumps this counter, so
+            # the component gets a fresh state and events never replay forever.
+            grid_key = f"drag_grid_{st.session_state.get('grid_clock', 0)}"
+            drag_event = drag_grid(
+                page_thumbnails=[
+                    cached_page_preview(
+                        working_pdf_grid, order_map[number - 1], card_dpi
                     )
+                    for number in preview_numbers
+                ],
+                page_numbers=preview_numbers,
+                selected=tool_page,
+                per_row=per_row,
+                key=grid_key,
+            )
+
+            if isinstance(drag_event, dict):
+                st.session_state["grid_clock"] = (
+                    st.session_state.get("grid_clock", 0) + 1
+                )
+                if drag_event.get("type") == "select":
+                    selected_page = int(drag_event["page"])
+                    st.session_state.tool_page = selected_page
+                    st.session_state.preview_page = selected_page
                     st.rerun()
-            elif drag_event.get("type") == "rotate":
-                rotated_page = int(drag_event.get("page", 0))
-                try:
-                    with st.spinner(f"Rotating page {rotated_page}..."):
-                        result = rotate_page(working_pdf, rotated_page, 90)
-                except ValueError as page_error:
-                    st.error(f"Could not rotate page: {page_error}")
-                else:
-                    st.session_state.tool_page = rotated_page
-                    st.session_state.working_pdf = result.pdf_bytes
-                    st.session_state.edit_note = (
-                        f"Page {rotated_page} rotated 90° clockwise. "
-                        "Successfully."
-                    )
-                    st.rerun()
-            elif drag_event.get("type") == "order":
-                dropped = [int(n) for n in drag_event.get("order", [])]
-                visible_set = set(preview_numbers)
-                if (
-                    sorted(dropped) == sorted(visible_set)
-                    and dropped != preview_numbers
-                ):
-                    # The user reordered the visible pages among themselves;
-                    # pages beyond the preview limit keep their relative
-                    # order right after them, so nothing is ever lost.
-                    new_order = dropped + [
-                        n
-                        for n in range(1, page_count_total + 1)
-                        if n not in visible_set
-                    ]
+                elif drag_event.get("type") == "remove":
+                    removed_page = int(drag_event.get("page", 0))
+                    # A pending grid order must become real bytes BEFORE the
+                    # deletion, so `removed_page` points at the right page.
+                    _materialize_pending_page_order()
+                    working_pdf_grid = st.session_state.working_pdf
                     try:
-                        with st.spinner("Rearranging pages..."):
-                            result = apply_page_order(working_pdf, new_order)
-                    except ValueError as order_error:
-                        st.error(f"Order problem: {order_error}")
-                        st.stop()
-                    st.session_state.working_pdf = result.pdf_bytes
-                    st.session_state.edit_note = (
-                        "Pages rearranged by drag and drop."
-                    )
-                    st.rerun()
+                        with st.spinner(f"Removing page {removed_page}..."):
+                            result = delete_pages(working_pdf_grid, [removed_page])
+                    except ValueError as page_error:
+                        st.error(f"Error removing page : {page_error}")
+                    else:
+                        selected_page = int(st.session_state.get("tool_page", 1))
+                        if removed_page < selected_page:
+                            selected_page -= 1
+                        elif removed_page == selected_page:
+                            selected_page = min(removed_page, page_count - 1)
+                        st.session_state.tool_page = max(1, selected_page)
+                        st.session_state.working_pdf = result.pdf_bytes
+                        st.session_state.pop("page_order", None)
+                        st.session_state.pop("preview_page", None)
+                        st.session_state.pop("preview_original_pdf", None)
+                        st.session_state.edit_note = (
+                            f"Page {removed_page} removed successfully."
+                        )
+                        st.rerun()
+                elif drag_event.get("type") == "rotate":
+                    rotated_page = int(drag_event.get("page", 0))
+                    _materialize_pending_page_order()
+                    working_pdf_grid = st.session_state.working_pdf
+                    try:
+                        with st.spinner(f"Rotating page {rotated_page}..."):
+                            result = rotate_page(working_pdf_grid, rotated_page, 90)
+                    except ValueError as page_error:
+                        st.error(f"Could not rotate page: {page_error}")
+                    else:
+                        st.session_state.tool_page = rotated_page
+                        st.session_state.working_pdf = result.pdf_bytes
+                        st.session_state.edit_note = (
+                            f"Page {rotated_page} rotated 90° clockwise. "
+                            "Successfully."
+                        )
+                        st.rerun()
+                elif drag_event.get("type") == "order":
+                    dropped = [int(n) for n in drag_event.get("order", [])]
+                    visible_set = set(preview_numbers)
+                    if (
+                        sorted(dropped) == sorted(visible_set)
+                        and dropped != preview_numbers
+                    ):
+                        # The user reordered the visible pages among themselves;
+                        # pages beyond the preview limit keep their relative
+                        # order right after them, so nothing is ever lost.
+                        # FAST PATH: only the DISPLAY mapping changes here.
+                        # The working-copy bytes are folded on the next full
+                        # rerun by _materialize_pending_page_order().
+                        tail = [
+                            n
+                            for n in range(1, page_count + 1)
+                            if n not in visible_set
+                        ]
+                        st.session_state.page_order = [
+                            order_map[n - 1] for n in dropped + tail
+                        ]
+                        st.toast("Pages rearranged by drag and drop.", icon="✅")
+                        st.rerun(scope="fragment")
 
-        if page_count_total > preview_limit:
-            st.button(
-                f"⬇ {visible_count} of {page_count_total} pages - show more",
-                on_click=lambda: st.session_state.update(
-                    preview_limit=st.session_state.get("preview_limit", 24) + 24
-                ),
-            )
+            if page_count > preview_limit:
+                st.button(
+                    f"⬇ {visible_count} of {page_count} pages - show more",
+                    on_click=lambda: st.session_state.update(
+                        preview_limit=st.session_state.get("preview_limit", 24) + 24
+                    ),
+                )
+
+        pages_grid()
 
         if st.session_state.get("edit_note"):
             note = st.session_state.pop("edit_note")
