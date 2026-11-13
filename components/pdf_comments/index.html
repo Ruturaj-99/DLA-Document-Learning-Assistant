@@ -134,6 +134,7 @@
   let draftText = "";
   let draftColor = "#D9D9D9";
   let draftHighlighted = false;
+  let draftFontSize = 11;
 
   function sendJson(value) {
     window.parent.postMessage({
@@ -171,10 +172,11 @@
     draftText = args.draft_text || "";
     draftColor = args.draft_color || "#D9D9D9";
     draftHighlighted = Boolean(args.draft_highlighted);
+    draftFontSize = Number(args.draft_font_size) || 11;
     image.style.cursor = draftText ? "crosshair" : "default";
     hint.textContent = draftText
-      ? "Click or drag on the page to place the highlighted text."
-      : "Drag existing highlighted text to move it.";
+      ? "Click or drag on the page to place the comment text."
+      : "Drag existing comment text to move it.";
     markers.replaceChildren();
     dropPreview.style.display = "none";
 
@@ -185,6 +187,7 @@
       marker.tabIndex = 0;
       marker.style.left = (comment.x * 100) + "%";
       marker.style.top = (comment.y * 100) + "%";
+      if (comment.font_size) marker.style.fontSize = comment.font_size + "pt";
       marker.style.backgroundColor = comment.highlighted
         ? comment.color + "B8"
         : "transparent";
@@ -259,8 +262,9 @@
     dropPreview.style.backgroundColor = draftHighlighted
       ? draftColor + "B8"
       : "transparent";
+    dropPreview.style.fontSize = draftFontSize + "pt";
     dropPreview.style.display = "block";
-    hint.textContent = "Release to place the highlighted text.";
+    hint.textContent = "Release to place the comment text.";
     const start = normalizedPosition(event);
     dropPreview.style.left = (start.x * image.clientWidth) + "px";
     dropPreview.style.top = (start.y * image.clientHeight) + "px";
@@ -284,11 +288,11 @@
       // next render() call re-arms from fresh args.
       draftText = "";
       image.style.cursor = "default";
-      hint.textContent = "Drag existing highlighted text to move it.";
+      hint.textContent = "Drag existing comment text to move it.";
       if (insideImage(upEvent)) {
         sendJson(Object.assign({type: "place"}, normalizedPosition(upEvent)));
       } else {
-        hint.textContent = "Release on the page to place the highlighted text.";
+        hint.textContent = "Release on the page to place the comment text.";
       }
     }
 

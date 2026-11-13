@@ -326,6 +326,8 @@ with tab_edit:
             editor_key = f"comment_editor_open_{page_number}"
             draft_key = f"comment_text_{page_number}"
             edit_id_key = f"comment_edit_id_{page_number}"
+            highlight_key = f"comment_highlight_{page_number}"
+            size_key = f"comment_size_{page_number}"
             comment_text = ""
             # Deferring the text clear to the top of the dialog body keeps the
             # assignment before the text_area is instantiated (Streamlit
@@ -336,6 +338,18 @@ with tab_edit:
             prefill = st.session_state.pop(f"{draft_key}_prefill", None)
             if prefill is not None:
                 st.session_state[draft_key] = prefill
+            # Editing also restores that comment's stored style so the
+            # toggles reflect what the comment currently looks like.
+            style_prefill = st.session_state.pop(
+                f"{draft_key}_style_prefill", None
+            )
+            if isinstance(style_prefill, dict):
+                st.session_state[highlight_key] = bool(
+                    style_prefill.get("highlighted", False)
+                )
+                st.session_state[size_key] = float(
+                    style_prefill.get("font_size", 11.0)
+                )
             editing_id = st.session_state.get(edit_id_key)
             if st.session_state.get(editor_key, False):
                 comment_text = st.text_area(
@@ -344,6 +358,34 @@ with tab_edit:
                     height=80,
                     placeholder="Type a comment to place on this page...",
                 )
+                # Optional style controls: plain text is the default; the
+                # highlight and the size only change when asked for here.
+                style_row = st.columns([2, 1, 1, 3])
+                with style_row[0]:
+                    highlighted = st.checkbox(
+                        "Highlight",
+                        key=highlight_key,
+                        help=(
+                            "Off: plain text, no highlight or border. "
+                            "On: a soft colour fill behind the text."
+                        ),
+                    )
+                with style_row[1]:
+                    if st.button("A−", key=f"comment_size_down_{page_number}"):
+                        st.session_state[size_key] = max(
+                            4.0, float(st.session_state.get(size_key, 11.0)) - 1.0
+                        )
+                with style_row[2]:
+                    if st.button("A+", key=f"comment_size_up_{page_number}"):
+                        st.session_state[size_key] = min(
+                            72.0, float(st.session_state.get(size_key, 11.0)) + 1.0
+                        )
+                with style_row[3]:
+                    st.caption(
+                        f"Text size: {float(st.session_state.get(size_key, 11.0)):g} pt "
+                        "(4–72)"
+                    )
+                size = float(st.session_state.get(size_key, 11.0))
                 action_columns = st.columns(2)
                 with action_columns[0]:
                     if st.button("Cancel", key=f"comment_cancel_{page_number}"):
@@ -361,7 +403,11 @@ with tab_edit:
                         try:
                             with st.spinner("Updating comment..."):
                                 st.session_state.working_pdf = update_pdf_comment(
-                                    working_pdf, editing_id, comment_text
+                                    working_pdf,
+                                    editing_id,
+                                    comment_text,
+                                    highlighted=highlighted,
+                                    font_size=size,
                                 )
                         except ValueError as comment_error:
                             st.error(f"Comment problem: {comment_error}")
@@ -379,7 +425,12 @@ with tab_edit:
                 page_comments,
                 draft_text=comment_text.strip(),
                 draft_color="#FFD54F",
-                draft_highlighted=True,
+                draft_highlighted=bool(
+                    st.session_state.get(highlight_key, False)
+                ),
+                draft_font_size=float(
+                    st.session_state.get(size_key, 11.0)
+                ),
                 key=(
                     "comment_canvas_"
                     f"{st.session_state.get('comment_canvas_clock', 0)}"
@@ -447,6 +498,10 @@ with tab_edit:
                             st.session_state[f"{draft_key}_prefill"] = (
                                 target.text
                             )
+                            st.session_state[f"{draft_key}_style_prefill"] = {
+                                "highlighted": target.highlighted,
+                                "font_size": target.font_size,
+                            }
                             st.rerun()
                     elif comment_event.get("type") == "delete":
                         with st.spinner("Deleting comment..."):
@@ -471,6 +526,14 @@ with tab_edit:
                                         comment_text,
                                         comment_event.get("x"),
                                         comment_event.get("y"),
+                                        highlighted=bool(
+                                            st.session_state.get(
+                                                highlight_key, False
+                                            )
+                                        ),
+                                        font_size=float(
+                                            st.session_state.get(size_key, 11.0)
+                                        ),
                                     )
                                     st.session_state.edit_note = (
                                         f"Comment updated on page {page_number}."
@@ -482,8 +545,15 @@ with tab_edit:
                                         comment_event.get("x"),
                                         comment_event.get("y"),
                                         comment_text,
-                                        highlighted=True,
+                                        highlighted=bool(
+                                            st.session_state.get(
+                                                highlight_key, False
+                                            )
+                                        ),
                                         color="#FFD54F",
+                                        font_size=float(
+                                            st.session_state.get(size_key, 11.0)
+                                        ),
                                     )
                                     st.session_state.edit_note = (
                                         f"Comment added to page {page_number}. "

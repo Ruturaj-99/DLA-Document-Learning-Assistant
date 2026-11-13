@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pdf_comments import (  # noqa: E402
+    _raw_display_rect,
     add_pdf_comment,
     delete_pdf_comment,
     list_pdf_comments,
@@ -76,6 +77,92 @@ def test_unhighlighted_comment_uses_neutral_marker_color():
 
     assert comment.highlighted is False
     assert comment.color == "#D9D9D9"
+
+
+def test_add_comment_defaults_to_plain_text_no_fill():
+    """Default comments are plain text: no highlight fill, 11 pt."""
+    pdf_bytes = add_pdf_comment(_build_pdf(), 1, 0.2, 0.3, "Plain comment")
+
+    comment = list_pdf_comments(pdf_bytes)[0]
+    document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        annotation = next(document[0].annots())
+        assert comment.font_size == pytest.approx(11.0)
+        assert not annotation.colors["fill"]  # no highlight fill
+    finally:
+        document.close()
+
+
+def test_font_size_round_trips_and_scales_the_text():
+    pdf_bytes = add_pdf_comment(
+        _build_pdf(), 1, 0.2, 0.3, "Big text", font_size=24
+    )
+
+    comment = list_pdf_comments(pdf_bytes)[0]
+    document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        annotation = next(document[0].annots())
+        assert comment.font_size == pytest.approx(24.0)
+        assert _raw_display_rect(document[0], annotation).height > 24
+    finally:
+        document.close()
+
+
+def test_font_size_out_of_range_is_rejected():
+    with pytest.raises(ValueError, match="between 4 and 72"):
+        add_pdf_comment(_build_pdf(), 1, 0.2, 0.3, "Too big", font_size=73)
+    with pytest.raises(ValueError, match="between 4 and 72"):
+        add_pdf_comment(_build_pdf(), 1, 0.2, 0.3, "Too small", font_size=3)
+
+
+def test_update_can_restyle_highlight_and_size():
+    original = add_pdf_comment(_build_pdf(), 1, 0.2, 0.3, "Restyle me")
+    comment_id = list_pdf_comments(original)[0].comment_id
+
+    # A v1-style no-size comment keeps its stored look unless restyled.
+    updated = update_pdf_comment(
+        original, comment_id, "Restyle me", highlighted=True, font_size=18
+    )
+    styled = list_pdf_comments(updated)[0]
+    assert styled.highlighted is True
+    assert styled.font_size == pytest.approx(18.0)
+
+    # None keeps the just-stored style.
+    kept = update_pdf_comment(updated, comment_id, "Restyle me")
+    assert list_pdf_comments(kept)[0].font_size == pytest.approx(18.0)
+    assert list_pdf_comments(kept)[0].highlighted is True
+
+
+def test_legacy_v1_comment_still_reads_with_default_size():
+    """Comments written before per-comment sizes parse as 11 pt."""
+    document = pymupdf.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 200), "legacy")
+    annot = page.add_freetext_annot(
+        pymupdf.Rect(72, 200, 200, 220), "Legacy comment", fontname="Helv"
+    )
+    annot.set_info(
+        title="AI DLA comment",
+        subject="ai-dla-comment:v1:abcd1234abcd1234abcd1234abcd1234:1:FFD54F",
+    )
+    annot.update()
+    pdf_bytes = document.tobytes()
+    document.close()
+
+    comment = list_pdf_comments(pdf_bytes)[0]
+
+    assert comment.comment_id == "abcd1234abcd1234abcd1234abcd1234"
+    assert comment.highlighted is True
+    assert comment.color == "#FFD54F"
+    assert comment.font_size == pytest.approx(11.0)
+
+
+def test_update_with_invalid_font_size_is_rejected():
+    original = add_pdf_comment(_build_pdf(), 1, 0.2, 0.3, "Sized")
+    comment_id = list_pdf_comments(original)[0].comment_id
+
+    with pytest.raises(ValueError, match="between 4 and 72"):
+        update_pdf_comment(original, comment_id, "Sized", font_size=100)
 
 
 def test_move_comment_changes_saved_position_and_keeps_comment():
