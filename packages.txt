@@ -1,5 +1,2 @@
-# Native binaries Streamlit Cloud must install before pip packages.
-# Enables the Stage 5A OCR path (pytesseract needs the Tesseract engine,
-# which is not pip-installable).
 tesseract-ocr
 tesseract-ocr-eng
