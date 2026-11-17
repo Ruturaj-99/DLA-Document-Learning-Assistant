@@ -71,12 +71,16 @@ st.write(
 REASON_HELP = {
     "no_passages": "The document had no searchable text (empty or scanned-only pages).",
     "low_relevance": (
-        "The best matching passage was barely similar to your question, so no "
-        "answer was attempted."
+        "No passage was similar enough to your question, and none contained "
+        "enough of the question's key terms, so no answer was attempted."
     ),
     "model_no_support": (
-        "Passage matches looked plausible, but the local model confirmed the "
-        "passages do not contain the answer."
+        "The passages looked plausible, and even after an explicit second "
+        "check the local model confirmed they do not contain the answer."
+    ),
+    "ungrounded_answer": (
+        "The model's reply contained values that appear nowhere in the "
+        "retrieved passages, so it was discarded for safety."
     ),
 }
 
@@ -1175,8 +1179,9 @@ with tab_ask:
                     if closest:
                         st.info(
                             f"The best-matching passage scored "
-                            f"{closest[0].score:.2f} similarity; answers require "
-                            f"at least {DEFAULT_MIN_SCORE:.2f}."
+                            f"{closest[0].score:.2f} similarity; answers need "
+                            f"similarity **{DEFAULT_MIN_SCORE:.2f}** or passages "
+                            f"containing the question's key terms."
                         )
                         with st.expander("🧠 See the closest passages the AI found"):
                             for number, result in enumerate(closest, start=1):

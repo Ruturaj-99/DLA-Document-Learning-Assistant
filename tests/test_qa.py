@@ -156,6 +156,269 @@ def test_mocked_retrieval_empty_reports_no_passages_without_calling_model():
     assert bundle.reason == "no_passages" and bundle.sources == []
 
 
+# --- Stage 5L: refusal-variant detection ----------------------------------------
+#
+# The local model does not always reproduce the marker exactly: llama3.2:3b
+# was observed replying "NO ANSWER_IN_DOCUMENTS". The old exact-substring
+# check let that variant leak through as a REAL answer, with citations
+# attached to a refusal.
+
+
+SPEC_CHUNKS = [
+    Chunk("spec-manual", 2, "The boiling point of acetone is 56 degrees Celsius.", 60, 118),
+    Chunk("spec-manual", 1, "Storage: keep containers tightly closed and cool.", 0, 59),
+    Chunk("catalogue", 9, "Our range includes solvents, gauges and valves for industries.", 0, 80),
+]
+SPEC_EMBEDDED = embed_chunks(SPEC_CHUNKS)
+
+
+def test_variant_refusal_marker_is_not_leaked_as_an_answer():
+    calls = []
+
+    def model_says_variant(prompt: str) -> str:
+        calls.append(prompt)
+        return "NO ANSWER_IN_DOCUMENTS"
+
+    bundle = qa.answer_question(
+        "How do I reset the heater?", EMBEDDED, ask=model_says_variant
+    )
+    assert bundle.not_found is True
+    assert bundle.reason == "model_no_support"
+    assert bundle.sources == []  # never cite a refusal
+    assert len(calls) == 1  # no retry: lexical evidence is weak here
+
+
+def test_hedged_refusal_is_detected():
+    def model_hedges(prompt: str) -> str:
+        return "I am sorry, but I cannot find that information in the passages."
+
+    bundle = qa.answer_question("How do I reset the heater?", EMBEDDED, ask=model_hedges)
+    assert bundle.not_found is True
+    assert bundle.reason == "model_no_support"
+
+
+def test_looks_like_refusal_covers_observed_wordings():
+    assert qa.looks_like_refusal("ANSWER_NOT_IN_DOCUMENTS")
+    assert qa.looks_like_refusal("NO ANSWER_IN_DOCUMENTS")
+    assert qa.looks_like_refusal("The passages do not contain the answer.")
+    assert qa.looks_like_refusal("not found in the documents")
+    assert qa.looks_like_refusal("Insufficient information.")
+    assert not qa.looks_like_refusal("It is 56 degrees Celsius.")
+    assert not qa.looks_like_refusal("")
+
+
+# --- Stage 5L: evidence-based retry when the model refuses wrongly ---------------
+
+
+def test_wrong_refusal_gets_one_evidence_backed_retry():
+    calls = []
+
+    def model_first_refuses_then_answers(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            return qa.NOT_FOUND_MARKER
+        return "The boiling point of acetone is 56 degrees Celsius."
+
+    bundle = qa.answer_question(
+        "Boiling point of acetone?", SPEC_EMBEDDED, ask=model_first_refuses_then_answers
+    )
+    assert len(calls) == 2  # exactly one retry, never a forced loop
+    assert bundle.not_found is False
+    assert bundle.reason == "ok"
+    assert "56" in bundle.answer
+    assert bundle.sources
+
+
+def test_retry_that_still_refuses_is_reported_honestly():
+    calls = []
+
+    def model_always_refuses(prompt: str) -> str:
+        calls.append(prompt)
+        return qa.NOT_FOUND_MARKER
+
+    bundle = qa.answer_question(
+        "Boiling point of acetone?", SPEC_EMBEDDED, ask=model_always_refuses
+    )
+    assert len(calls) == 2
+    assert bundle.not_found is True
+    assert bundle.reason == "model_no_support"
+    assert bundle.sources == []
+
+
+# --- Stage 5L: lexical evidence tier of the answerability gate -------------------
+
+
+def test_low_cosine_with_strong_lexical_evidence_is_answerable():
+    """Tier 2: the passage literally contains the question's rare terms, so a
+    low cosine score must not block it (e.g. BM25-led dense spec rows)."""
+    def fake_model(prompt: str) -> str:
+        return "56 degrees Celsius."
+
+    bundle = qa.answer_question(
+        "Boiling point of acetone?",
+        SPEC_EMBEDDED,
+        min_score=0.99,  # tier 1 (cosine) deliberately impossible
+        ask=fake_model,
+    )
+    assert bundle.not_found is False
+    assert bundle.reason == "ok"
+
+
+def test_weak_cosine_without_lexical_evidence_still_rejected():
+    bundle = qa.answer_question(
+        "How do I reset the heater?", EMBEDDED, min_score=0.99, ask=fail_if_called
+    )
+    assert bundle.not_found is True
+    assert bundle.reason == "low_relevance"
+    assert bundle.sources == []
+
+
+# --- Stage 5L: borderline band - the model validates answerability ---------------
+
+
+def _mocked_result(score: float, text: str) -> SearchResult:
+    return SearchResult("manual", 2, text, 10, 10 + len(text), score)
+
+
+def test_borderline_passage_is_validated_by_the_model_not_auto_rejected():
+    """Gold passage inside the top-1 chunk at cosine 0.23 (measured q050):
+    just below the gate. The model - not a threshold - decides, and its
+    grounded answer is accepted."""
+    seen = []
+
+    def fake_model(prompt: str) -> str:
+        seen.append(prompt)
+        return "Deliveries take five working days."
+
+    weak_but_gold = _mocked_result(0.23, "Deliveries take five working days.")
+    with mock.patch.object(qa, "search_chunks", return_value=[weak_but_gold]):
+        bundle = qa.answer_question(
+            "How long do standard deliveries take?", [], ask=fake_model
+        )
+    assert bundle.not_found is False
+    assert bundle.reason == "ok"
+    assert len(seen) == 1
+
+
+def test_borderline_passage_refused_by_model_is_reported_honestly():
+    calls = []
+
+    def refusing_model(prompt: str) -> str:
+        calls.append(prompt)
+        return qa.NOT_FOUND_MARKER
+
+    weak = _mocked_result(0.23, "Order consumables with the exact part number.")
+    with mock.patch.object(qa, "search_chunks", return_value=[weak]):
+        bundle = qa.answer_question(
+            "What is the price of the blue valve?", [], ask=refusing_model
+        )
+    assert bundle.not_found is True
+    assert bundle.reason == "model_no_support"
+    assert bundle.sources == []
+
+
+def test_passage_below_borderline_window_is_rejected_without_model():
+    def fail(prompt: str) -> str:
+        raise AssertionError("model must not be called with no evidence at all")
+
+    hopeless = _mocked_result(0.10, "Some unrelated text.")
+    with mock.patch.object(qa, "search_chunks", return_value=[hopeless]):
+        bundle = qa.answer_question("What is the price?", [], ask=fail)
+    assert bundle.not_found is True
+    assert bundle.reason == "low_relevance"
+
+
+# --- Stage 5L: grounding check ---------------------------------------------------
+
+
+def test_answer_with_invented_number_is_discarded():
+    def model_invents(prompt: str) -> str:
+        return "The boiling point of acetone is 101 degrees Celsius."  # 101 not in evidence
+
+    bundle = qa.answer_question(
+        "Boiling point of acetone?", SPEC_EMBEDDED, ask=model_invents
+    )
+    assert bundle.not_found is True
+    assert bundle.reason == "ungrounded_answer"
+    assert bundle.sources == []
+
+
+def test_word_number_paraphrase_is_not_rejected():
+    def model_spells_out(prompt: str) -> str:
+        return "The boiling point of acetone is fifty-six degrees."
+
+    bundle = qa.answer_question(
+        "Boiling point of acetone?", SPEC_EMBEDDED, ask=model_spells_out
+    )
+    assert bundle.not_found is False
+
+
+def test_ungrounded_numbers_boundary_aware():
+    context = "jumbo frame size 9216 bytes; accuracy 0.8 or higher; range 19 - 30 VDC"
+    assert qa._ungrounded_numbers("size is 9216 bytes.", context) == []
+    assert qa._ungrounded_numbers("accuracy is 0.8.", context) == []
+    assert qa._ungrounded_numbers("range is 19-30 VDC.", context) == []
+    assert qa._ungrounded_numbers("weight is 174 g.", context) == ["174"]
+    # "9" must not match inside "9216"
+    assert qa._ungrounded_numbers("exactly 9 units.", context) == ["9"]
+    # a sentence-final period does not break matching (BV-100.)
+    assert qa._ungrounded_numbers("part number BV-100.", "blue valve BV-100.") == []
+
+
+def test_ungrounded_numbers_accepts_comma_and_point_decimals():
+    context = "specific gravity minimum 1.5"
+    assert qa._ungrounded_numbers("gravity is 1,5", context) == []
+    assert qa._ungrounded_numbers("gravity is 1.5", context) == []
+    assert qa._ungrounded_numbers("gravity is 2.5", context) == ["2.5"]
+
+
+def test_spoken_numbers_in_context_are_groundable():
+    # The document spells values out; the answer may write digits. Same VALUE.
+    assert qa._ungrounded_numbers(
+        "more than 0.2 bar", "leak fails if the drop is greater than zero point two bar"
+    ) == []
+    assert qa._ungrounded_numbers(
+        "-40 to +300 degrees Celsius",
+        "probes are rated minus forty to plus three hundred degrees Celsius",
+    ) == []
+    assert qa._ungrounded_numbers(
+        "exceeded 95 degrees", "the heater exceeded ninety five degrees"
+    ) == []
+    assert qa._ungrounded_numbers(
+        "accuracy is plus or minus 1.5 degrees",
+        "accurate to plus or minus one point five degrees",
+    ) == []
+
+
+def test_spoken_number_converter_forms():
+    convert = qa._spoken_numbers_to_digits
+    assert convert("zero point two bar") == "0.2 bar"
+    assert convert("ninety five degrees") == "95 degrees"
+    assert convert("three hundred units") == "300 units"
+    assert convert("forty to fifty") == "40 to 50"
+    assert convert("one point five degrees") == "1.5 degrees"
+    # non-numeric text is untouched
+    assert convert("no numbers in this phrase") == "no numbers in this phrase"
+
+
+# --- Stage 5L: source prioritization ---------------------------------------------
+
+
+def test_sources_prioritize_evidence_bearing_passages():
+    catalogue = SearchResult("catalogue", 40, "Our range includes gauges and valves.", 0, 44, 0.61)
+    evidence = SearchResult("spec", 7, "Float Size: 73 x 240h. Weight 174 g.", 0, 36, 0.55)
+    out = qa.prioritize_sources("The weight is 174 g.", [catalogue, evidence])
+    assert out[0] is evidence
+    assert out[1] is catalogue  # generic passage stays listed, just later
+
+
+def test_prioritize_sources_no_numbers_keeps_order():
+    catalogue = SearchResult("catalogue", 40, "Our range includes gauges and valves.", 0, 44, 0.61)
+    evidence = SearchResult("spec", 7, "Wipe the enclosure with a damp cloth.", 0, 37, 0.55)
+    sources = [catalogue, evidence]
+    assert qa.prioritize_sources("Wipe it with a damp cloth.", sources) is sources
+
+
 def _ollama_ready() -> bool:
     from src.ollama import ollama_available
 
