@@ -53,7 +53,7 @@ def test_connection_error_becomes_friendly_runtime_error():
     with mock.patch.object(
         ollama.requests, "post", side_effect=requests.exceptions.ConnectionError()
     ):
-        with pytest.raises(RuntimeError, match="Cannot reach Ollama"):
+        with pytest.raises(RuntimeError, match="Cannot reach the model server"):
             ollama.ask_ollama("Why does the fan spin up?")
 
 

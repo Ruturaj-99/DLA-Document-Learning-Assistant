@@ -1,5 +1,9 @@
-# Secrets
+# Secrets (never commit tokens, API keys or tunnel credentials)
 .env
+.streamlit/secrets.toml
+# Local Streamlit runtime settings (personal port config etc.)
+.streamlit/config.toml
+.cloudflared/
 
 # Python
 __pycache__/

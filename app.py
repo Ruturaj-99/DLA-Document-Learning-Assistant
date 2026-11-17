@@ -35,6 +35,7 @@ from src.comment_canvas import comment_canvas
 from src.document_search import find_word
 from src.drag_grid import drag_grid
 from src.embeddings import embed_chunks
+from src.llm_providers import DEFAULT_MODELS, SUPPORTED_PROVIDERS, ask_openai_compatible
 from src.ollama import ask_ollama
 from src.ocr import ocr_page, page_needs_ocr
 from src.page_view import render_page_with_boxes, render_selectable_page_html
@@ -1148,8 +1149,37 @@ with tab_ask:
         if pages_without_text:
             st.caption(f"Pages without extractable text: {pages_without_text}")
 
-        # --- Ask a question ---------------------------------------------------
+        # --- Answer engine (local Ollama or the user's own API key) -----------
+        # Phase 1.3: the local Ollama may live behind the secure Cloudflare
+        # Tunnel + auth proxy (OLLAMA_BASE_URL / OLLAMA_API_TOKEN secrets); or
+        # the user can answer with their own hosted API key (BYOK).
         st.subheader("❓ Ask about the document")
+        engine = st.radio(
+            "Answer engine",
+            ["Local Ollama model", "Bring your own API key (BYOK)"],
+            horizontal=True,
+            help="Local Ollama: your machine's private model. BYOK: a hosted "
+            "provider you already pay for - the key stays in memory for this "
+            "session only and is never stored or logged.",
+        )
+
+        if engine.startswith("Bring"):
+            provider_name = st.selectbox("Provider", list(SUPPORTED_PROVIDERS))
+            default_base = SUPPORTED_PROVIDERS[provider_name]
+            base_url = st.text_input(
+                "API base URL",
+                value=default_base,
+                disabled=bool(default_base),
+                help="Pre-filled for known providers; paste your own URL for "
+                "'Custom (OpenAI-compatible)'.",
+            )
+            api_key = st.text_input("API key", type="password")
+            model_name = st.text_input(
+                "Model name",
+                value=DEFAULT_MODELS.get(provider_name, ""),
+                placeholder="e.g. gpt-4o-mini",
+            )
+
         question = st.text_input(
             "Your question",
             placeholder="e.g. How often should the filter be cleaned?",
@@ -1159,13 +1189,27 @@ with tab_ask:
             if not question.strip():
                 st.warning("Please type a question first.")
             else:
+                if engine.startswith("Bring"):
+                    try:
+                        ask_fn = ask_openai_compatible(
+                            api_key=api_key,
+                            model=model_name,
+                            base_url=base_url,
+                        )
+                    except ValueError as setup_error:
+                        st.warning(str(setup_error))
+                        st.stop()
+                else:
+                    ask_fn = ask_ollama
+
                 with st.spinner("Searching the document and thinking..."):
                     try:
                         bundle = answer_question(
-                            question, embedded_chunks, ask=ask_ollama
+                            question, embedded_chunks, ask=ask_fn
                         )
                     except RuntimeError as server_error:
-                        # ollama connection problems carry friendly messages already.
+                        # ollama/BYOK connection problems carry friendly
+                        # messages already.
                         st.error(f"Model problem: {server_error}")
                         st.stop()
 
