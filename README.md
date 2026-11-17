@@ -9,11 +9,18 @@ with local AI answering via **Ollama** (`llama3.2:3b`).
 
 ## Run locally
 
+> **Important:** the `.venv` already exists in this project folder. Only run
+> the `python -m venv .venv` command when it is MISSING (or after stopping
+> every running instance of the app). Running venv setup/pip surgery while
+> the app is running leaves locked files behind and silently empties
+> installed packages - the cause of `ImportError: cannot import name
+> 'descriptor' from 'google.protobuf'`-type breakages.
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # (Windows; on Linux/macOS: source .venv/bin/activate)
-pip install -r requirements.txt
-streamlit run app.py
+python -m venv .venv                # only if .venv does not exist yet!
+.venv\Scripts\Activate.ps1          # (Windows PowerShell)
+pip install -r requirements.txt     # only needed once / after changes
+streamlit run app.py --server.address 127.0.0.1
 ```
 
 Optional, for the "Ask" tab: install [Ollama](https://ollama.com) locally and

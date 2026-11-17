@@ -269,6 +269,44 @@ def move_page(
 _MIN_REPLACEMENT_FONTSIZE = 4.0
 
 
+def _group_match_rects(rects: list[pymupdf.Rect]) -> list[list[pymupdf.Rect]]:
+    """Group the per-line rects of one match into single occurrences.
+
+    `page.search_for` returns one rect per line when the searched phrase
+    wraps onto the next line. Those rects belong to the SAME occurrence, so
+    the replacement must be inserted once per group - inserting once per
+    rect would duplicate the new text on every line.
+    """
+    groups: list[list[pymupdf.Rect]] = []
+    for rect in sorted(rects, key=lambda item: (item.y0, item.x0)):
+        if groups and rect.y0 - groups[-1][-1].y1 < 0.5 * rect.height:
+            groups[-1].append(rect)
+        else:
+            groups.append([rect])
+    return groups
+
+
+def _scan_backed_page(page: pymupdf.Page, rects: list[pymupdf.Rect]) -> bool:
+    """Does a page-sized image lie behind the matched text?
+
+    Scanned PDFs usually carry an invisible OCR text layer ON TOP of the page
+    image. The words are therefore "selectable" but their visible form is
+    burned into the image: redacting only the text layer leaves the original
+    words visible and the replacement overlaps them.
+    """
+    page_area = max(1.0, page.rect.get_area())
+    big_image_rects = []
+    for image in page.get_images(full=True):
+        for image_rect in page.get_image_rects(image[0]):
+            if image_rect.get_area() >= 0.5 * page_area:
+                big_image_rects.append(image_rect)
+    return any(
+        image_rect.intersects(match)
+        for image_rect in big_image_rects
+        for match in rects
+    )
+
+
 def _available_replacement_width(
     page: pymupdf.Page, rect: pymupdf.Rect, redacted_rects: list[pymupdf.Rect]
 ) -> float:
@@ -347,31 +385,35 @@ def _fitted_replacement_fontsize(
 
 
 def _replace_on_native_page(
-    page: pymupdf.Page, old_text: str, new_text: str, page_number: int
+    page: pymupdf.Page,
+    old_text: str,
+    new_text: str,
+    page_number: int,
+    rects: list[pymupdf.Rect] | None = None,
 ) -> int:
     """Redact native text and reinsert it with the closest source styling.
 
     Returns how many occurrences were replaced.
     """
-    rects = page.search_for(old_text)
+    if rects is None:
+        rects = page.search_for(old_text)
     if not rects:
         raise ValueError(
             f"'{old_text}' was not found on page {page_number} as selectable text. "
             "If this page is a scan, the search words must match what OCR reads."
         )
 
-    styles = [
-        _native_text_style(page, rect, new_text)
-        for rect in rects
-    ]
+    groups = _group_match_rects(rects)
+    styles = [_native_text_style(page, group[0], new_text) for group in groups]
     # Fit BEFORE redacting (while the surrounding text is still measurable), so
     # a too-long replacement can never run over the word printed next to it.
     fitted_sizes = [
-        _fitted_replacement_fontsize(page, rect, new_text, style, rects)
-        for rect, style in zip(rects, styles)
+        _fitted_replacement_fontsize(page, group[0], new_text, style, rects)
+        for group, style in zip(groups, styles)
     ]
-    for rect in rects:
-        page.add_redact_annot(rect)  # mark the area: "erase what is underneath"
+    for group in groups:
+        for rect in group:
+            page.add_redact_annot(rect)  # mark the area: "erase what is underneath"
     # PDF_REDACT_IMAGE_NONE = do NOT delete the images of the page (a scan page
     # is one big image; we only want the text gone).
     page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
@@ -379,7 +421,11 @@ def _replace_on_native_page(
     if new_text.strip():
         with TemporaryDirectory() as temporary_directory:
             for index, (rect, style, fitted_size) in enumerate(
-                zip(rects, styles, fitted_sizes)
+                zip(
+                    [group[0] for group in groups],
+                    styles,
+                    fitted_sizes,
+                )
             ):
                 fontfile = None
                 if style.font_data and style.font_extension:
@@ -395,7 +441,7 @@ def _replace_on_native_page(
                     fontfile=str(fontfile) if fontfile else None,
                     color=style.color,
                 )
-    return len(rects)
+    return len(groups)
 
 
 def _native_text_style(
@@ -475,6 +521,119 @@ def _native_text_style(
         font_data=font_data,
         font_extension=font_extension,
     )
+
+
+def _replace_on_hybrid_page(
+    document: pymupdf.Document,
+    page: pymupdf.Page,
+    pdf_bytes: bytes,
+    page_number: int,
+    old_text: str,
+    new_text: str,
+    rects: list[pymupdf.Rect],
+) -> int:
+    """Replace text on a scan-backed page (image + invisible OCR text layer).
+
+    The visible words are burned into the page image while the searchable
+    words are an invisible text layer printed on top. A plain redaction only
+    removes that invisible layer, so the old words stay VISIBLE and the
+    replacement overlaps them. Instead this:
+      1. redacts the invisible text layer (keeps search and the AI in sync),
+      2. white-outs the burned-in words on the image (deletes the visible
+         original),
+      3. inserts the replacement with the visually nearest local font and
+         the matched size (shrunk only when it would not fit).
+    """
+    from src.pdf_font_estimation import estimate_scanned_page_fonts
+
+    groups = _group_match_rects(rects)
+    try:
+        font_estimate = estimate_scanned_page_fonts(
+            pdf_bytes, page_number, top_n=1
+        )
+    except (ValueError, RuntimeError):
+        font_estimate = None  # no OCR engine / no fonts: fall back to the layer style
+
+    styles = []
+    for group in groups:
+        base_style = _native_text_style(page, group[0], new_text)
+        font_size = base_style.fontsize
+        font_data = base_style.font_data
+        font_extension = base_style.font_extension
+        if font_estimate is not None and font_estimate.lines:
+            group_rect = pymupdf.Rect(group[0])
+            for rect in group[1:]:
+                group_rect |= rect
+            matching_line = max(
+                font_estimate.lines,
+                key=lambda line: pymupdf.Rect(line.bounds)
+                .intersect(group_rect)
+                .get_area(),
+            )
+            if matching_line.matches:
+                best_match = matching_line.matches[0]
+                font_size = float(best_match.estimated_size_points)
+                if best_match.font_path:
+                    font_path = Path(best_match.font_path)
+                    try:
+                        font_data = font_path.read_bytes()
+                        font_extension = font_path.suffix.lstrip(".") or "ttf"
+                    except OSError:
+                        font_data = None
+                else:
+                    font_data = None
+        styles.append(
+            _ReplacementTextStyle(
+                baseline=base_style.baseline,
+                fontsize=font_size,
+                fontname="replacement_hybrid" if font_data else "helv",
+                color=base_style.color,
+                font_data=font_data,
+                font_extension=font_extension,
+            )
+        )
+
+    fitted_sizes = [
+        _fitted_replacement_fontsize(page, group[0], new_text, style, rects)
+        for group, style in zip(groups, styles)
+    ]
+    # 1. Erase the invisible text layer (search + AI keep working).
+    for group in groups:
+        for rect in group:
+            page.add_redact_annot(rect)
+    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
+    # 2. Delete the visible original burned into the page image.
+    for group in groups:
+        cover = pymupdf.Rect(group[0])
+        for rect in group[1:]:
+            cover |= rect
+        page.draw_rect(cover + (-2, -2, 2, 2), color=(1, 1, 1), fill=(1, 1, 1))
+
+    # 3. Print the replacement with the matched font, on top of the white-out.
+    if new_text.strip():
+        with TemporaryDirectory() as temporary_directory:
+            for index, (rect, style, fitted_size) in enumerate(
+                zip(
+                    [group[0] for group in groups],
+                    styles,
+                    fitted_sizes,
+                )
+            ):
+                fontfile = None
+                if style.font_data and style.font_extension:
+                    fontfile = Path(temporary_directory) / (
+                        f"replacement_{index}.{style.font_extension}"
+                    )
+                    fontfile.write_bytes(style.font_data)
+                page.insert_text(
+                    (rect.x0, style.baseline),
+                    new_text,
+                    fontsize=fitted_size,
+                    fontname=style.fontname,
+                    fontfile=str(fontfile) if fontfile else None,
+                    color=style.color,
+                )
+    return len(groups)
 
 
 def _fitted_scanned_fontsize(
@@ -652,10 +811,24 @@ def replace_text(
         # `needs_ocr` (a < 20 characters heuristic) would misjudge a short
         # native page. So the decision is made by what actually works:
         # if the words are selectable text -> real text edit; only when the
-        # page is really image-only do we go the OCR route.
-        if page_text.strip() and page.search_for(old_text):
+        # page is really image-only do we go the OCR route. A scan-backed
+        # page (page image + invisible OCR text layer) gets the hybrid
+        # treatment so the VISIBLE original is deleted too.
+        match_rects = page.search_for(old_text) if page_text.strip() else []
+        if match_rects and _scan_backed_page(page, match_rects):
+            changes = _replace_on_hybrid_page(
+                document,
+                page,
+                pdf_bytes,
+                int(page_number),
+                old_text,
+                new_text,
+                match_rects,
+            )
+            origin = "scan-backed page (OCR layer)"
+        elif match_rects:
             changes = _replace_on_native_page(
-                page, old_text, new_text, int(page_number)
+                page, old_text, new_text, int(page_number), match_rects
             )
             origin = "native text"
         elif needs_ocr(page_text) and page.get_images(full=True):

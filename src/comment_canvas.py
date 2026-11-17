@@ -23,6 +23,7 @@ def comment_canvas(
     draft_text: str,
     draft_color: str,
     draft_highlighted: bool,
+    draft_font_size: float,
     key: str,
 ) -> dict[str, Any] | None:
     """Display a page and return one drag-to-place or marker-move event."""
@@ -34,6 +35,7 @@ def comment_canvas(
             "y": comment.y,
             "highlighted": comment.highlighted,
             "color": comment.color,
+            "font_size": comment.font_size,
         }
         for comment in comments
     ]
@@ -43,6 +45,7 @@ def comment_canvas(
         draft_text=draft_text,
         draft_color=draft_color,
         draft_highlighted=draft_highlighted,
+        draft_font_size=draft_font_size,
         key=key,
         default=None,
     )

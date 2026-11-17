@@ -318,6 +318,115 @@ def test_missing_text_on_scanned_page_is_rejected():
         replace_text(factory.MIXED_PDF, 1, "hedgehog", "anything")
 
 
+# --- Scan-backed pages: page image + invisible OCR text layer -----------------
+
+
+def _build_scan_backed_pdf() -> bytes:
+    """A scanned page WITH an invisible-style OCR text layer on top.
+
+    The words exist twice: burned into the page image (what the eye sees)
+    and as a real text layer (what search/the AI reads) - the exact situation
+    where a plain redaction left the old text visible and the replacement
+    overlapped it.
+    """
+    import pymupdf
+    from PIL import Image, ImageDraw
+
+    image_buffer = io.BytesIO()
+    image = Image.new("RGB", (612, 792), "white")
+    ImageDraw.Draw(image).text(
+        (72, 186), "alpha beta gamma", fill="black"
+    )  # burned into the image, baseline ~= 200
+    image.save(image_buffer, format="PNG")
+    document = pymupdf.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_image(page.rect, stream=image_buffer.getvalue())
+    page.insert_text((72, 200), "alpha beta gamma", fontname="helv", fontsize=14)
+    return document.tobytes()
+
+
+def _dark_pixel_count(pdf_bytes: bytes, rect) -> int:
+    """Count dark pixels inside `rect` (pymupdf top-left coordinates)."""
+    import pymupdf
+
+    document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = document[0]
+        pixmap = page.get_pixmap(dpi=72)  # 1 px = 1 pt, same top-left origin
+        x0 = max(0, int(rect.x0))
+        x1 = min(pixmap.width, int(rect.x1))
+        y0 = max(0, int(rect.y0))
+        y1 = min(pixmap.height, int(rect.y1))
+        count = 0
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                if sum(pixmap.pixel(x, y)[:3]) < 384:  # darker than mid-grey
+                    count += 1
+        return count
+    finally:
+        document.close()
+
+
+@pytest.mark.skipif(
+    ENGINE is None, reason="Tesseract engine not installed on this machine"
+)
+def test_replace_text_on_scan_backed_page_erases_burned_in_text():
+    """Deleting a word on a scan-backed page must ALSO erase the pixels of
+    the word burned into the image - the old complaint was that the original
+    text stayed visible and the replacement overlapped it."""
+    import pymupdf
+
+    original = _build_scan_backed_pdf()
+    burned_region = pymupdf.Rect(138, 182, 190, 208)
+    before = _dark_pixel_count(original, burned_region)
+    assert before > 0  # the burned-in word is really there
+
+    result = replace_text(original, 1, "gamma", "")
+
+    assert result.origin == "scan-backed page (OCR layer)"
+    after = _dark_pixel_count(result.pdf_bytes, burned_region)
+    assert after < before * 0.25  # image area is whited out now
+    # The searchable layer lost the word too.
+    pages = extract_pdf_pages(result.pdf_bytes, enable_ocr=False)
+    assert "gamma" not in pages[0].text
+
+
+@pytest.mark.skipif(
+    ENGINE is None, reason="Tesseract engine not installed on this machine"
+)
+def test_replace_text_on_scan_backed_page_swaps_in_real_text():
+    original = _build_scan_backed_pdf()
+
+    result = replace_text(original, 1, "gamma", "omega")
+
+    assert result.origin == "scan-backed page (OCR layer)"
+    pages = extract_pdf_pages(result.pdf_bytes, enable_ocr=False)
+    assert "omega" in pages[0].text
+    assert "gamma" not in pages[0].text
+
+
+def test_replace_text_spanning_two_lines_inserts_once():
+    """A phrase that wraps onto a second line is ONE match: search_for
+    returns one rect per line, and the replacement must be written once -
+    not once per line rect (which duplicated it)."""
+    import pymupdf
+
+    document = pymupdf.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 200), "alpha beta", fontname="helv", fontsize=14)
+    page.insert_text((72, 220), "gamma delta", fontname="helv", fontsize=14)
+    original = document.tobytes()
+    document.close()
+
+    result = replace_text(original, 1, "alpha beta gamma", "omega")
+
+    assert result.changes == 1
+    pages = extract_pdf_pages(result.pdf_bytes, enable_ocr=False)
+    text = pages[0].text
+    assert text.count("omega") == 1
+    assert "alpha" not in text and "beta" not in text and "gamma" not in text
+
+
 # --- Stage 7B: insert blank page / insert pages from another PDF / text layer --
 
 

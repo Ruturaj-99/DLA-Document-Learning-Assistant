@@ -9,8 +9,16 @@ import pymupdf
 
 
 _COMMENT_SUBJECT = re.compile(
-    r"ai-dla-comment:v1:([0-9a-f]{32}):([01]):([0-9a-fA-F]{6})"
+    r"ai-dla-comment:v[123]:([0-9a-f]{32}):([01]):([0-9a-fA-F]{6})"
+    r"(?::(\d+(?:\.\d+)?))?(?::(-?\d+):(-?\d+))?"
 )
+
+
+# The one font size every comment used before per-comment sizes existed.
+DEFAULT_COMMENT_FONT_SIZE = 11.0
+
+# Stored normalized positions are rounded to millionths (plenty for pixels).
+_POSITION_SCALE = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -24,6 +32,7 @@ class PdfComment:
     y: float
     highlighted: bool
     color: str
+    font_size: float = DEFAULT_COMMENT_FONT_SIZE
 
 
 def _validate_position(x: float, y: float) -> tuple[float, float]:
@@ -48,18 +57,76 @@ def _parse_color(color: str) -> tuple[str, tuple[float, float, float]]:
 
 
 def _comment_metadata(annotation: pymupdf.Annot):
+    """Decode identity + style + position from the annotation subject.
+
+    Returns ``(id, highlighted, color, font_size, x, y)``; x/y are the
+    stored normalized position, or ``None`` for comments written before
+    positions were embedded (v1/v2 subjects).
+    """
     match = _COMMENT_SUBJECT.fullmatch(annotation.info.get("subject", ""))
     if match is None:
         return None
-    return match.group(1), match.group(2) == "1", f"#{match.group(3).upper()}"
+    font_size = (
+        float(match.group(4))
+        if match.group(4)
+        else DEFAULT_COMMENT_FONT_SIZE
+    )
+    stored_x = (
+        int(match.group(5)) / _POSITION_SCALE if match.group(5) else None
+    )
+    stored_y = (
+        int(match.group(6)) / _POSITION_SCALE if match.group(6) else None
+    )
+    return (
+        match.group(1),
+        match.group(2) == "1",
+        f"#{match.group(3).upper()}",
+        font_size,
+        stored_x,
+        stored_y,
+    )
 
 
-def _display_rect(page: pymupdf.Page, annotation: pymupdf.Annot) -> pymupdf.Rect:
+def _raw_display_rect(page: pymupdf.Page, annotation: pymupdf.Annot) -> pymupdf.Rect:
+    """Display-space rect computed from the raw /Rect dictionary key.
+
+    pymupdf 2.0 crashes with a native access violation when reading the
+    bound rect (``annotation.rect``) of a reopened FreeText annot, so we
+    never touch it: the raw /Rect lives in PDF space (origin bottom-left,
+    relative to the crop box) and is converted to the same value
+    ``annotation.rect * page.rotation_matrix`` would yield.
+    """
+    entry = page.parent.xref_get_key(annotation.xref, "Rect")
+    if entry[0] == "array":
+        values = [float(token) for token in entry[1].strip("[]").split()]
+        if len(values) == 4:
+            box = page.cropbox
+            unrotated = pymupdf.Rect(
+                values[0] - box.x0,
+                box.y1 - values[3],
+                values[2] - box.x0,
+                box.y1 - values[1],
+            )
+            return unrotated * page.rotation_matrix
     return annotation.rect * page.rotation_matrix
 
 
+def _comment_position(
+    page: pymupdf.Page, annotation: pymupdf.Annot, metadata: tuple
+) -> tuple[float, float]:
+    """Normalized comment position: stored value, else from the raw rect."""
+    stored_x, stored_y = metadata[4], metadata[5]
+    if stored_x is not None and stored_y is not None:
+        return stored_x, stored_y
+    point = _raw_display_rect(page, annotation).tl
+    return (
+        min(max(point.x / page.rect.width, 0), 1),
+        min(max(point.y / page.rect.height, 0), 1),
+    )
+
+
 def _page_rect(
-    page: pymupdf.Page, x: float, y: float, text: str
+    page: pymupdf.Page, x: float, y: float, text: str, fontsize: float = 11.0
 ) -> pymupdf.Rect:
     left = min(x, max(0.0, page.rect.width - 1.0))
     top = min(y, max(0.0, page.rect.height - 1.0))
@@ -71,7 +138,7 @@ def _page_rect(
         line = ""
         for word in paragraph.split():
             candidate = f"{line} {word}".strip()
-            if font.text_length(candidate, fontsize=11) <= max_text_width:
+            if font.text_length(candidate, fontsize=fontsize) <= max_text_width:
                 line = candidate
                 continue
             if line:
@@ -80,7 +147,7 @@ def _page_rect(
             part = ""
             for character in word:
                 candidate = part + character
-                if part and font.text_length(candidate, fontsize=11) > max_text_width:
+                if part and font.text_length(candidate, fontsize=fontsize) > max_text_width:
                     wrapped_lines.append(part)
                     part = character
                 else:
@@ -89,12 +156,12 @@ def _page_rect(
         wrapped_lines.append(line)
     width = max(
         18.0,
-        max(font.text_length(line, fontsize=11) for line in wrapped_lines) + 8.0,
+        max(font.text_length(line, fontsize=fontsize) for line in wrapped_lines) + 8.0,
     )
     width = min(width, max_width)
     height = min(
         page.rect.height - top,
-        max(18.0, len(wrapped_lines) * 14.0 + 4.0),
+        max(18.0, len(wrapped_lines) * fontsize * 1.27 + 4.0),
     )
     return pymupdf.Rect(left, top, left + width, top + height)
 
@@ -123,17 +190,18 @@ def list_pdf_comments(pdf_bytes: bytes, page_number: int | None = None) -> list[
                 metadata = _comment_metadata(annotation)
                 if metadata is None:
                     continue
-                comment_id, highlighted, color = metadata
-                point = _display_rect(page, annotation).tl
+                comment_id, highlighted, color, font_size = metadata[:4]
+                x, y = _comment_position(page, annotation, metadata)
                 comments.append(
                     PdfComment(
                         comment_id=comment_id,
                         page_number=page_index + 1,
                         text=annotation.info.get("content", ""),
-                        x=min(max(point.x / page.rect.width, 0), 1),
-                        y=min(max(point.y / page.rect.height, 0), 1),
+                        x=x,
+                        y=y,
                         highlighted=highlighted,
                         color=color,
+                        font_size=font_size,
                     )
                 )
         return comments
@@ -142,10 +210,20 @@ def list_pdf_comments(pdf_bytes: bytes, page_number: int | None = None) -> list[
 
 
 def _comment_subject(
-    comment_id: str, highlighted: bool, color: str
+    comment_id: str,
+    highlighted: bool,
+    color: str,
+    font_size: float,
+    x: float,
+    y: float,
 ) -> str:
-    """Encode identity + style in the annotation subject, as before."""
-    return f"ai-dla-comment:v1:{comment_id}:{int(highlighted)}:{color[1:]}"
+    """Encode identity + style + position in the annotation subject (v3)."""
+    size_text = f"{font_size:g}"
+    return (
+        f"ai-dla-comment:v3:{comment_id}:{int(highlighted)}:"
+        f"{color[1:]}:{size_text}:"
+        f"{round(x * _POSITION_SCALE)}:{round(y * _POSITION_SCALE)}"
+    )
 
 
 def _insert_comment(
@@ -157,14 +235,27 @@ def _insert_comment(
     highlighted: bool,
     color: str,
     comment_id: str,
+    font_size: float = DEFAULT_COMMENT_FONT_SIZE,
 ) -> bytes:
-    """Attach one FreeText annot at a display-space anchor, then serialize."""
-    display_rect = _page_rect(page, anchor_x, anchor_y, clean_text)
+    """Attach one FreeText annot at a normalized anchor, then serialize.
+
+    ``anchor_x``/``anchor_y`` are normalized display coordinates and are
+    stored in the subject so reading the position back never has to touch
+    the annotation rect (which crashes in pymupdf 2.0).
+
+    Default look: PLAIN text - no fill, no border, no highlight. The fill
+    (highlight) only appears when the user explicitly asks for it.
+    """
+    target_x = anchor_x * page.rect.width
+    target_y = anchor_y * page.rect.height
+    display_rect = _page_rect(
+        page, target_x, target_y, clean_text, fontsize=font_size
+    )
     page_rect = display_rect * page.derotation_matrix
     annotation = page.add_freetext_annot(
         page_rect,
         clean_text,
-        fontsize=11,
+        fontsize=font_size,
         fontname="Helv",
         text_color=(0.12, 0.12, 0.12),
         fill_color=_parse_color(color)[1] if highlighted else None,
@@ -174,7 +265,9 @@ def _insert_comment(
     )
     annotation.set_info(
         title="AI DLA comment",
-        subject=_comment_subject(comment_id, highlighted, color),
+        subject=_comment_subject(
+            comment_id, highlighted, color, font_size, anchor_x, anchor_y
+        ),
     )
     annotation.update()
     return document.tobytes(garbage=4, deflate=True)
@@ -189,10 +282,24 @@ def add_pdf_comment(
     *,
     highlighted: bool = False,
     color: str = "#D9D9D9",
+    font_size: float = DEFAULT_COMMENT_FONT_SIZE,
 ) -> bytes:
-    """Add visible, movable comment text with an optional highlight."""
+    """Add visible, movable comment text.
+
+    Default: plain text with NO highlight and NO border. A highlight (a soft
+    colour fill behind the text) is only drawn when `highlighted=True` - the
+    user must explicitly ask for it.
+    """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Enter comment text before placing it on the page.")
+    try:
+        normalized_size = float(font_size)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Comment font size must be numeric.") from error
+    if not math.isfinite(normalized_size) or not 4 <= normalized_size <= 72:
+        raise ValueError(
+            "Comment font size must be between 4 and 72 points."
+        )
     normalized_x, normalized_y = _validate_position(x, y)
     normalized_color, rgb = _parse_color(color)
     document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -204,8 +311,6 @@ def add_pdf_comment(
             )
         page = document[page_number - 1]
         clean_text = text.strip()
-        target_x = normalized_x * page.rect.width
-        target_y = normalized_y * page.rect.height
         # Idempotence: a drop gesture can fire twice (race between the element
         # re-render and the new event). Re-adding identical text at (nearly)
         # the same spot must merge into the existing layer, never stack a
@@ -216,18 +321,25 @@ def add_pdf_comment(
                 continue
             if annotation.info.get("content", "").strip() != clean_text:
                 continue
-            point = _display_rect(page, annotation).tl
-            if math.hypot(point.x - target_x, point.y - target_y) <= 12.0:
+            x, y = _comment_position(page, annotation, metadata)
+            if (
+                math.hypot(
+                    (x - normalized_x) * page.rect.width,
+                    (y - normalized_y) * page.rect.height,
+                )
+                <= 12.0
+            ):
                 return document.tobytes(garbage=4, deflate=True)
         return _insert_comment(
             document,
             page,
-            target_x,
-            target_y,
+            normalized_x,
+            normalized_y,
             clean_text,
             highlighted,
             normalized_color,
             uuid.uuid4().hex,
+            font_size=normalized_size,
         )
     finally:
         document.close()
@@ -245,19 +357,19 @@ def move_pdf_comment(
                 metadata = _comment_metadata(annotation)
                 if metadata is None or metadata[0] != comment_id:
                     continue
-                display_point = pymupdf.Point(
-                    normalized_x * page.rect.width,
-                    normalized_y * page.rect.height,
-                )
-                display_rect = _page_rect(
+                _, highlighted, color, font_size = metadata[:4]
+                page.delete_annot(annotation)
+                return _insert_comment(
+                    document,
                     page,
-                    display_point.x,
-                    display_point.y,
-                    annotation.info.get("content", ""),
+                    normalized_x,
+                    normalized_y,
+                    annotation.info.get("content", "").strip(),
+                    highlighted,
+                    color,
+                    comment_id,
+                    font_size=font_size,
                 )
-                annotation.set_rect(display_rect * page.derotation_matrix)
-                annotation.update()
-                return document.tobytes(garbage=4, deflate=True)
         raise ValueError("That comment no longer exists in this PDF.")
     finally:
         document.close()
@@ -269,12 +381,18 @@ def update_pdf_comment(
     text: str,
     x: float | None = None,
     y: float | None = None,
+    *,
+    highlighted: bool | None = None,
+    color: str | None = None,
+    font_size: float | None = None,
 ) -> bytes:
-    """Change an embedded comment's text, optionally moving it as well.
+    """Change an embedded comment's text/style, optionally moving it as well.
 
     Editing re-creates the annot so the wrapped text box fits the new text,
-    while keeping the original comment id, highlight, and color - unless a
-    position is given, in which case the comment also relocates there.
+    while keeping the original comment id - unless a position is given, in
+    which case the comment also relocates there. Style arguments that are
+    left as None keep the stored style; passing a value restyles the comment
+    (e.g. turning the highlight or a bigger font on at the user's request).
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Enter comment text before saving the comment.")
@@ -285,37 +403,35 @@ def update_pdf_comment(
                 metadata = _comment_metadata(annotation)
                 if metadata is None or metadata[0] != comment_id:
                     continue
-                _, highlighted, color = metadata
-                if x is None or y is None:
-                    anchor = _display_rect(page, annotation).tl
-                    if x is not None or y is not None:
-                        # Mixed arguments: keep whichever axis is unchanged.
-                        kept = _validate_position(
-                            x if x is not None else
-                            anchor.x / page.rect.width,
-                            y if y is not None else
-                            anchor.y / page.rect.height,
-                        )
-                        anchor = pymupdf.Point(
-                            kept[0] * page.rect.width,
-                            kept[1] * page.rect.height,
-                        )
-                else:
-                    normalized_x, normalized_y = _validate_position(x, y)
-                    anchor = pymupdf.Point(
-                        normalized_x * page.rect.width,
-                        normalized_y * page.rect.height,
+                _, stored_highlighted, stored_color, stored_size = metadata[:4]
+                effective_highlighted = (
+                    stored_highlighted if highlighted is None else bool(highlighted)
+                )
+                effective_color = stored_color if color is None else color
+                normalized_color, rgb = _parse_color(effective_color)
+                effective_size = stored_size if font_size is None else float(font_size)
+                if not math.isfinite(effective_size) or not 4 <= effective_size <= 72:
+                    raise ValueError(
+                        "Comment font size must be between 4 and 72 points."
+                    )
+                anchor_x, anchor_y = _comment_position(page, annotation, metadata)
+                if x is not None or y is not None:
+                    # Keep whichever axis was not given.
+                    anchor_x, anchor_y = _validate_position(
+                        x if x is not None else anchor_x,
+                        y if y is not None else anchor_y,
                     )
                 page.delete_annot(annotation)
                 return _insert_comment(
                     document,
                     page,
-                    anchor.x,
-                    anchor.y,
+                    anchor_x,
+                    anchor_y,
                     text.strip(),
-                    highlighted,
-                    color,
+                    effective_highlighted,
+                    normalized_color,
                     comment_id,
+                    font_size=effective_size,
                 )
         raise ValueError("That comment no longer exists in this PDF.")
     finally:
