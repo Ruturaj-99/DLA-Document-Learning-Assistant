@@ -1,4 +1,4 @@
-# AI Document Learning Assistant - Edit, Rearrange, Extract, Ask Anything From PDF 
+# AI Document Learning Assistant - Edit - Rearrange - Extract - Ask Anything From PDF 
 
 A private-by-design PDF workspace: upload a document, refine its pages, add
 comments, replace text, run OCR, and ask questions answered from the document's
