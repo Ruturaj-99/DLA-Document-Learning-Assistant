@@ -1,18 +1,4 @@
-"""Python bridge to the local Ollama service.
 
-Step 4B of the AI Document Learning Assistant.
-
-In simple words: this file is the "phone" our project uses to call the AI
-model that runs on your own computer. Our code sends a small packet of JSON
-(the question) to http://localhost:11434 - the address where Ollama listens -
-and gets a packet back containing the answer as text.
-
-IMPORTANT boundaries (per the project plan):
-    - This module sends ONE simple message. The clever "cheat sheet" prompt
-      with citations is built in Stage 4C, NOT here.
-    - No secrets, no API keys: everything stays on your machine.
-    - Only the already-installed `requests` package is used for HTTP.
-"""
 
 import json
 import os
