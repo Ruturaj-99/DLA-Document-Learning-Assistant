@@ -1,7 +1,4 @@
 """AI Document Learning Assistant - entry point.
-
-Stage 7A: the app now has the three-tab structure the user asked for:
-
     1. Upload     - PDF upload + step-by-step preparation + document metrics
     2. Edit PDF   - the editing workspace (replace / delete / rotate; add
                     page, merge and "OCR & save as editable text" come in
