@@ -10,10 +10,7 @@
     background: transparent;
   }
   body { box-sizing: border-box; }
-  /* NOTE: never add `container-type` to #page. Inline-size containment makes
-     `width: fit-content` resolve against a box with no contents, so #page and
-     the page image inside it collapse to 0px wide and the canvas becomes
-     unclickable. There are no @container queries in this file. */
+
   #page {
     position: relative;
     width: fit-content;
