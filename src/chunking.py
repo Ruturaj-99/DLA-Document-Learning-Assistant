@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from src.pdf_loader import PageContent
 
-# Sensible defaults; can be overridden per call for different document types.
+
 DEFAULT_CHUNK_SIZE = 1200  # characters per chunk
 DEFAULT_OVERLAP = 150  # characters repeated between neighboring chunks
 
