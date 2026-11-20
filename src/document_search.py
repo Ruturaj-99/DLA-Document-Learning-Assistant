@@ -1,20 +1,4 @@
-"""Find a word or phrase in a whole document - across page types.
 
-Stage 5E of the AI Document Learning Assistant.
-
-Why this exists (the connective piece): the app can now READ scanned pages
-(Stage 5B/5C), but searching for a particular word needed its own tool.
-`find_word` searches EVERY page of a document, whether it is real text or a
-picture of text, and reports WHERE the match sits:
-
-    - native text pages: words come from the PDF itself (pymupdf), with
-      reliable coordinates,
-    - scanned pages: words come from OCR (Stage 5B), each with a confidence
-      score, because OCR can read slightly wrong.
-
-Matches are returned with PDF-point coordinates - exactly the coordinate
-space the later viewer/highlight feature uses.
-"""
 
 from dataclasses import dataclass
 from typing import Optional
