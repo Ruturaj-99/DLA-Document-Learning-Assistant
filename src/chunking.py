@@ -28,12 +28,7 @@ def split_page_text(
 ) -> list[tuple[int, int, str]]:
     """Split one page's text into (start_char, end_char, text) windows.
 
-    The loop keeps a sliding window of `chunk_size` characters and moves it
-    forward by `chunk_size - overlap` each step (condensed windows move at
-    least one character, never backward). When a window would cut a word in
-    half (not at the very end of the text), we back the window's end off to
-    the previous space so chunks break at word boundaries.
-    """
+    
     if chunk_size < 1:
         raise ValueError("chunk_size must be at least 1 character.")
     if not 0 <= overlap < chunk_size:
