@@ -1,23 +1,3 @@
-"""Text chunking with source metadata.
-
-Stage 3A of the AI Document Learning Assistant.
-
-Long pages are split into smaller, overlapping chunks so that later stages
-can search for precise passages. Every chunk remembers exactly where it
-came from:
-
-    document_id  - which uploaded document it belongs to
-    page_number  - 1-based page inside that document
-    text         - the chunk text itself
-    start_char   - index of the first chunk character in the PAGE text
-    end_char     - index just past the last character (Python slice style)
-
-The two offsets are guaranteed to be true slices: writing
-`page_text[start_char:end_char]` always reproduces `chunk.text`.
-That round-trip guarantee is what lets a later stage verify a cited
-passage against the original page text before visualizing it.
-"""
-
 from dataclasses import dataclass
 
 from src.pdf_loader import PageContent
