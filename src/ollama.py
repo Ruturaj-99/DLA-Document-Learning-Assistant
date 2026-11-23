@@ -81,6 +81,13 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+# Extraction is a deterministic task: the same passages and question should
+# produce the same value/label answer, not one of several sampled wordings
+# (Stage 5M measured refusals that appeared on one sample but not the next).
+# Ollama's default is temperature 0.8; 0 makes technical extraction stable.
+EXTRACTION_OPTIONS = {"temperature": 0}
+
+
 def ask_ollama(
     question: str,
     passages: list[str] | None = None,
@@ -120,6 +127,7 @@ def ask_ollama(
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "stream": False,  # we want one complete answer, not streamed pieces
+        "options": dict(EXTRACTION_OPTIONS),
     }
 
     # --- 3. Send the request and translate failures into friendly errors ---

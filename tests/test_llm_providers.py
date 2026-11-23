@@ -57,6 +57,7 @@ def test_request_shape_and_auth_header():
     assert args[0].endswith("/chat/completions")
     assert kwargs["headers"]["Authorization"] == "Bearer sk-secret"
     assert kwargs["json"]["stream"] is False
+    assert kwargs["json"]["temperature"] == 0  # Stage 5M: deterministic extraction
     assert kwargs["json"]["messages"] == [{"role": "user", "content": "Hello"}]
 
 

@@ -83,6 +83,11 @@ REASON_HELP = {
         "The model's reply contained values that appear nowhere in the "
         "retrieved passages, so it was discarded for safety."
     ),
+    "unsupported_attribute": (
+        "The passages do not state the specific value you asked for (for "
+        "example a serial number or a reliable count); the model reused a "
+        "number from another place, so the reply was discarded for safety."
+    ),
 }
 
 # Tools dropdown entry that opens the pencil-driven comment flow.
@@ -1220,13 +1225,21 @@ with tab_ask:
                     # Stage 5D (part c): SHOW why it was refused instead of
                     # leaving the user guessing. Closest passages + scores.
                     closest = search_chunks(question, embedded_chunks, top_k=3)
-                    if closest:
+                    if closest and bundle.reason == "low_relevance":
                         st.info(
                             f"The best-matching passage scored "
                             f"{closest[0].score:.2f} similarity; answers need "
                             f"similarity **{DEFAULT_MIN_SCORE:.2f}** or passages "
                             f"containing the question's key terms."
                         )
+                    elif closest and bundle.reason == "model_no_support":
+                        st.info(
+                            f"Retrieval did find plausible passages (best "
+                            f"{closest[0].score:.2f} similarity), and the model "
+                            f"re-read them once, but still reported that they "
+                            f"do not contain the answer."
+                        )
+                    if closest:
                         with st.expander("🧠 See the closest passages the AI found"):
                             for number, result in enumerate(closest, start=1):
                                 st.markdown(

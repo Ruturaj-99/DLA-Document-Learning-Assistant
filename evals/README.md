@@ -94,6 +94,7 @@ cosine gate itself is untouched:
    says the passages DO contain the question's rare terms, it is asked
    once more, explicitly - the refusal marker stays available, so the
    model is never forced. Still refusing → honest "not found".
+   (Stage 5M widened this to a neutral retry after ANY refusal; see below.)
 4. **Grounding check** (`_ungrounded_numbers`). Every number in the
    answer must appear in the retrieved passages (boundary-aware, comma
    and point decimals both accepted, spelled-out document values like
@@ -111,6 +112,55 @@ cosine gate itself is untouched:
    shift BM25 statistics and reorder unrelated questions (measured:
    `odams-01` regressed 1 → 2 under filtering).
 
+## Stage 5M: evidence-to-answer reliability
+
+The Stage 5L benchmarks above measure **retrieval + grounding**, so they were
+re-run unchanged after Stage 5M: synthetic hit@1 0.920 / hit@3 1.000 /
+hit@5 1.000 / MRR 0.958 / context_coverage 1.000 / answer_supported 1.000 /
+citation_valid 1.000 / rejection 1.0, and multidoc overall
+hit@1 0.528 / hit@3 0.778 / hit@5 0.861 / MRR 0.658 / rejection 1.000.
+No metric moved: retrieval embeddings, chunking, ranking, the model, and the
+0.25 cosine gate are untouched.
+
+Real-PDF diagnostics (29-page pressure datasheet, printed 13-31 pages of the
+valve sequence document) exposed gaps that those scripted benchmarks cannot
+see:
+
+| Symptom | Measured cause | Fix (all outside retrieval ranking) |
+|---|---|---|
+| "calibration range of tag GQB01CP001" refused although the Annexure-IV row exists | The exact row was vector rank 59 / BM25 rank 32; hybrid RRF buried it under prose about the same subject | `select_evidence` adds chunks containing rare exact literals (letters+digits identifiers and rare 2-3 word phrases) that occur in <= 3 chunks; at most 2 added, prepended, real cosine kept |
+| Correct remote-seal explanation refused | A refusal was final unless IDF lexical coverage >= 0.5; explanatory questions legitimately share few rare terms with the passage | After ANY refusal, re-read the SAME evidence once with a neutral prompt; a second refusal is still honoured |
+| Same question refused on one run and answered on the next | Ollama's default temperature 0.8 sampled the extraction task | `EXTRACTION_OPTIONS`/`EXTRACTION_TEMPERATURE` set temperature 0 for local and BYOK providers |
+| Accuracy/turndown answer dumped a table; multi-part answers lost a part | Prompt only asked for "brief" text | Explicit answer rules: exact values/units, match the row/column, answer every part, one or two short sentences, never copy a passage or cite from the model |
+| A serial-number question was answered "1" from the row's quantity column; a row count question was answered "4" from 14 rows | Grounding only checked whether a number appears SOMEWHERE, not whether it answers the asked attribute | Narrow deterministic guards discard a 1-2 digit reply to an identifier question and counts not stated with a count label in the passages; both abstain honestly |
+| UI said "answers require at least 0.25" even when the model refused after retrieval | One generic caption for all refusal reasons | Reason-specific UI explanation, including `unsupported_attribute` |
+
+Live pressure-datasheet before -> after (top_k 4, same PDF, llama3.2:3b at
+temperature 0): calibration range "could not find" -> "0 - 3.55 kg/cm2";
+remote-seal explanation "could not find" -> correct diaphragm/capillary answer;
+accuracy/turndown correct but table-dump -> "± 0.06 % ... 60:1"; output signal
+and supply voltage "4-20 mA, 18-30 V DC" (the 18-30 value is NOT in the PDF) ->
+"4 to 20 mA ... 10.5 to 42 V DC" (the value printed on page 1); flange BOM
+(image-only drawing page) still abstains; price still abstains; serial-number
+question now abstains instead of answering "1".
+
+Live valve-sequence-document validation (19 pages, top_k 4) confirmed the
+same mechanisms on a different document type: CEB2 pumps/valves and the
+"NO OF CYCLES : 10 appx." count answered correctly; an implicit row count,
+an unstated compressor model/manufacturer, and an unstated pump-pressure
+setpoint all abstain. The count guard first caused three benchmark
+regressions (an identifier phrased "part number of", an inline count "5 x
+eth ports", and the worded answer "Dual SIM"); it was narrowed to skip
+identifier questions and non-numeric answers and to accept counts stated
+beside the counted noun. Both benchmarks then returned to their Stage 5L
+baselines exactly: synthetic answer_supported/citation_valid 1.000,
+multidoc overall supp/cite 0.861, with every other retrieval metric
+unchanged.
+
+The PDFs used for these checks are user documents and are not committed;
+`tests/test_qa_stage5m.py` pins each mechanism with a fake model so the
+regressions stay catchable without Ollama.
+
 ## Remaining misses
 
 - Retrieval (5 answerable questions with no gold passage in top-5):
@@ -118,6 +168,21 @@ cosine gate itself is untouched:
   lookalike rotameter/catalogue pages), `tsw114-05` ("weigh" vs the
   page's "Weight" - no lexical or stemming overlap), `tsw114-06`.
 - Synthetic: none - answer_supported and citation_valid are both 1.000.
+- Stage 5M: counting rows that are only implicit in a dense table (e.g. "how
+  many transmitters are listed in Annexure IV?" where the page has 14 numbered
+  rows but no stated total) is not reliable with llama3.2:3b - it guessed "4".
+  The prompt now forbids guessing and the guard discards unstated counts, so
+  such a question abstains instead of producing a confident wrong number. A
+  count printed in the passage ("NO OF CYCLES : 10") is still answered.
+- Stage 5M / retrieval scope: a multi-part question is only as complete as
+  the retrieved passages. On the valve document, "which valves open in
+  downward backwash and how long does it last?" got the valve names but not
+  the duration (the duration line was outside top_k 4), and the
+  upward-vs-downward flow-direction question got only the upward half
+  (the page holding the downward sentence was outside top_k 4). A supplier
+  name/address implied by the document footer also abstained; those
+  sentences were not in the passages. Retrieval ranking was deliberately
+  left unchanged in Stage 5M, so these remain known limitations.
 
 ## Reading the delta
 

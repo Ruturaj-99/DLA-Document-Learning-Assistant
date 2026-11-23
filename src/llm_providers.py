@@ -46,6 +46,11 @@ DEFAULT_MODELS = {
 }
 
 
+# Deterministic extraction: the same document + question should yield the
+# same value, not a sampled refusal/answer (Stage 5M).
+EXTRACTION_TEMPERATURE = 0
+
+
 def ask_openai_compatible(
     api_key: str,
     model: str,
@@ -84,6 +89,7 @@ def ask_openai_compatible(
             "model": model.strip(),
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
+            "temperature": EXTRACTION_TEMPERATURE,
         }
         headers = {
             "Content-Type": "application/json",

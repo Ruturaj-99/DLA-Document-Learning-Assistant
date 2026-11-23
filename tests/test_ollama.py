@@ -10,6 +10,7 @@ real local model, and politely skips itself when Ollama or the model is
 absent.
 """
 
+import json
 import sys
 import unittest.mock as mock
 from pathlib import Path
@@ -47,6 +48,16 @@ def test_empty_question_raises_without_any_http_call():
             with pytest.raises(ValueError, match="non-empty question"):
                 ollama.ask_ollama(blank)
         post_mock.assert_not_called()  # a blank question never reaches the network
+
+
+def test_extraction_request_is_deterministic():
+    # Stage 5M: the same passages + question must not be sampled differently;
+    # Ollama's default temperature 0.8 produced one-off refusals on live PDFs.
+    reply = fake_response(json_value={"message": {"content": "ok"}})
+    with mock.patch.object(ollama.requests, "post", return_value=reply) as post:
+        ollama.ask_ollama("What is the range?")
+    payload = json.loads(post.call_args.kwargs["data"])
+    assert payload["options"]["temperature"] == 0
 
 
 def test_connection_error_becomes_friendly_runtime_error():

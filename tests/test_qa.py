@@ -185,7 +185,9 @@ def test_variant_refusal_marker_is_not_leaked_as_an_answer():
     assert bundle.not_found is True
     assert bundle.reason == "model_no_support"
     assert bundle.sources == []  # never cite a refusal
-    assert len(calls) == 1  # no retry: lexical evidence is weak here
+    # Stage 5M: every refusal gets one neutral re-read; the variant is still
+    # caught after the retry and never leaks through as an answer.
+    assert len(calls) == 2
 
 
 def test_hedged_refusal_is_detected():
