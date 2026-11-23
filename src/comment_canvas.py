@@ -1,4 +1,4 @@
-"""Interactive PDF page canvas for placing and moving comment markers."""
+
 
 import base64
 from pathlib import Path
