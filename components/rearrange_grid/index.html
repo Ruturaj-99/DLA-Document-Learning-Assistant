@@ -4,16 +4,6 @@
 <meta charset="utf-8">
 <title>Drag-reorderable page preview</title>
 <script src="./sortable.min.js"></script>
-<!--
-  In-house Streamlit custom component (raw postMessage protocol) for the
-  "rearrange pages with the mouse" feature.
-
-  Protocol confirmed against Streamlit 1.66.1's own frontend bundle:
-    child -> parent: streamlit:componentReady  {isStreamlitMessage: true, apiVersion: 1}
-                     streamlit:setComponentValue {isStreamlitMessage: true, value, dataType: "json"}
-                     streamlit:setFrameHeight    {isStreamlitMessage: true, height}
-    parent -> child: streamlit:render {args: {...}, dfs, disabled, theme}
--->
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: visible; }
   #cards { display: flex; flex-wrap: wrap; gap: 10px; padding: 2px; align-items: flex-start; }
