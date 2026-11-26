@@ -23,10 +23,7 @@
     width: auto;
     height: auto;
     max-width: 100%;
-    /* This component reports its own height via streamlit:setFrameHeight, so
-       `vh` here resolves against that self-reported height and collapses to
-       ~0 on first layout: the image never grows, the iframe stays ~36px tall
-       and nothing on the page can be clicked. Cap it in pixels instead. */
+    
     max-height: 1100px;
     margin: 0 auto;
   }
